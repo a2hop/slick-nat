@@ -50,8 +50,11 @@ jobs:
         # Move package to project root for easier access
         mv build/${{ steps.version.outputs.deb_filename }} ../../
         
+        # Change back to project root for verification
+        cd ../../
+        
         # Verify package exists and show info
-        ls -la ../../${{ steps.version.outputs.deb_filename }}
+        ls -la ${{ steps.version.outputs.deb_filename }}
         echo "Package information:"
         dpkg-deb --info ${{ steps.version.outputs.deb_filename }}
         echo ""
