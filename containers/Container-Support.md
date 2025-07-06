@@ -19,6 +19,18 @@ Host System (Kernel Module)
         └── Container 2 (may have access)
 ```
 
+## Common Issues and Solutions
+
+### Symbolic Link Mount Errors
+
+The most common issue is mounting `/proc/net/slick_nat_mappings` when it's a symbolic link:
+
+```
+ERROR: Too many levels of symbolic links - Failed to mount
+```
+
+**Solution**: Use bind mounts through `raw.lxc` configuration instead of device mounts.
+
 ## LXD Configuration
 
 ### Prerequisites
@@ -65,26 +77,24 @@ For unprivileged containers (more secure):
 # Create unprivileged container
 lxc launch ubuntu:20.04 nat-container
 
-# Add raw LXC configuration for proc access
+# Use raw.lxc configuration for reliable proc access
 lxc config set nat-container raw.lxc "
 lxc.mount.entry = /proc/net/slick_nat_mappings proc/net/slick_nat_mappings none bind,create=file 0 0
-"
-
-# Enable nesting for network operations
-lxc config set nat-container security.nesting true
-
-# Add network capabilities
-lxc config set nat-container raw.lxc "
 lxc.cap.keep = net_admin net_raw
 lxc.aa_profile = unconfined
 "
 
+# Enable nesting for network operations
+lxc config set nat-container security.nesting true
+lxc config set nat-container security.syscalls.intercept.mount true
+lxc config set nat-container security.syscalls.intercept.mount.allowed "proc"
+
+# Start container
+lxc start nat-container
+
 # Install management script
 lxc file push /usr/local/bin/slnat nat-container/usr/local/bin/slnat
 lxc exec nat-container -- chmod +x /usr/local/bin/slnat
-
-# Restart container
-lxc restart nat-container
 ```
 
 ### Method 3: Automated Configuration
@@ -94,6 +104,9 @@ Use the provided configuration script:
 ```bash
 # Configure container automatically
 sudo ./lxd-config.sh nat-container
+
+# Start container
+lxc start nat-container
 
 # Test the configuration
 lxc exec nat-container -- slnat status
@@ -148,11 +161,45 @@ Since NAT mappings are per-namespace, consider:
 
 ## Troubleshooting
 
+### Container Cannot Start (Symbolic Link Error)
+
+```bash
+# Check if the error is related to symbolic links
+incus info --show-log container-name
+
+# If you see "Too many levels of symbolic links", remove device mount:
+lxc config device remove container-name slick-nat-proc
+
+# Use raw.lxc configuration instead:
+lxc config set container-name raw.lxc "
+lxc.mount.entry = /proc/net/slick_nat_mappings proc/net/slick_nat_mappings none bind,create=file 0 0
+"
+
+# Restart container
+lxc start container-name
+```
+
+### Alternative: Privileged Container Workaround
+
+If unprivileged containers continue to have issues:
+
+```bash
+# Make container privileged (less secure but more compatible)
+lxc config set container-name security.privileged true
+lxc restart container-name
+
+# Test access
+lxc exec container-name -- ls -la /proc/net/slick_nat_mappings
+```
+
 ### Container Cannot Access Module
 
 ```bash
 # Check if proc file exists in container
 lxc exec container -- ls -la /proc/net/slick_nat_mappings
+
+# Check if it's properly mounted
+lxc exec container -- mount | grep slick_nat
 
 # Check container configuration
 lxc config show container
@@ -160,21 +207,24 @@ lxc config show container
 # Check module on host
 lsmod | grep slick_nat
 
-# Check AppArmor profile
-lxc exec container -- cat /proc/self/attr/current
+# Verify host proc file exists
+ls -la /proc/net/slick_nat_mappings
 ```
 
 ### Permission Denied Errors
 
 ```bash
-# Check file permissions
+# Check file permissions in container
 lxc exec container -- ls -la /proc/net/slick_nat_mappings
 
 # Check container capabilities
 lxc exec container -- capsh --print
 
-# Try with different security profile
-lxc config set container security.privileged true
+# Check AppArmor profile
+lxc exec container -- cat /proc/self/attr/current
+
+# Try disabling AppArmor for testing
+lxc config set container raw.lxc "lxc.aa_profile = unconfined"
 lxc restart container
 ```
 
@@ -207,7 +257,42 @@ docker run -it --privileged \
 
 ## Best Practices
 
-### 1. Dedicated NAT Management
+### 1. Always Use Bind Mounts
+
+Avoid device mounts for proc files, use raw.lxc bind mounts:
+
+```bash
+# Good: Use bind mount
+lxc config set container raw.lxc "
+lxc.mount.entry = /proc/net/slick_nat_mappings proc/net/slick_nat_mappings none bind,create=file 0 0
+"
+
+# Avoid: Device mount (may cause symbolic link issues)
+# lxc config device add container slick-nat-proc disk ...
+```
+
+### 2. Test Configuration Step by Step
+
+```bash
+# 1. Start with basic container
+lxc launch ubuntu:20.04 test-container
+
+# 2. Configure access
+./lxd-config.sh test-container
+
+# 3. Start container
+lxc start test-container
+
+# 4. Test proc access
+lxc exec test-container -- ls -la /proc/net/slick_nat_mappings
+
+# 5. Install and test slnat
+lxc file push /usr/local/bin/slnat test-container/usr/local/bin/slnat
+lxc exec test-container -- chmod +x /usr/local/bin/slnat
+lxc exec test-container -- slnat status
+```
+
+### 3. Dedicated NAT Management
 
 Create a dedicated container for NAT management:
 
@@ -220,7 +305,7 @@ lxc launch ubuntu:20.04 nat-manager
 lxc exec nat-manager -- slnat eth0 add 2001:db8:internal::/64 2001:db8:external::/64
 ```
 
-### 2. Automation Scripts
+### 4. Automation Scripts
 
 Create scripts to manage container NAT configurations:
 
@@ -234,7 +319,7 @@ EXTERNAL="$3"
 lxc exec "$CONTAINER" -- slnat eth0 add "$INTERNAL" "$EXTERNAL"
 ```
 
-### 3. Monitoring and Logging
+### 5. Monitoring and Logging
 
 Monitor NAT operations from containers:
 
@@ -249,10 +334,11 @@ dmesg | grep -i slick
 
 ## Limitations
 
-1. **Per-namespace mappings**: Each container has its own isolated NAT mapping table
-2. **Host interfaces**: Mappings reference host network interfaces
-3. **Kernel dependency**: Module must be loaded on host
-4. **Privilege requirements**: Some operations require elevated privileges
+1. **Symbolic link issues**: `/proc/net/slick_nat_mappings` may be a symbolic link requiring bind mounts
+2. **Per-namespace mappings**: Each container has its own isolated NAT mapping table
+3. **Host interfaces**: Mappings reference host network interfaces
+4. **Kernel dependency**: Module must be loaded on host
+5. **Privilege requirements**: Some operations require elevated privileges or specific capabilities
 
 ## Examples
 

@@ -29,41 +29,49 @@ fi
 
 echo "Configuring container '$CONTAINER_NAME' for Slick NAT access..."
 
-# Method 1: Add proc file as device (for privileged containers)
-echo "Adding proc device access..."
-lxc config device add "$CONTAINER_NAME" slick-nat-proc disk \
-    source="/proc/net/slick_nat_mappings" \
-    path="/proc/net/slick_nat_mappings" \
-    readonly=false || echo "Warning: Failed to add proc device"
+# Remove any existing problematic device configurations
+echo "Cleaning up existing configurations..."
+lxc config device remove "$CONTAINER_NAME" slick-nat-proc 2>/dev/null || true
 
-# Method 2: Add raw.lxc configuration for unprivileged containers
-echo "Adding raw LXC configuration..."
+# Method 1: Use raw.lxc bind mount (more reliable)
+echo "Adding bind mount configuration..."
 lxc config set "$CONTAINER_NAME" raw.lxc "
 lxc.mount.entry = /proc/net/slick_nat_mappings proc/net/slick_nat_mappings none bind,create=file 0 0
-"
-
-# Method 3: Security configuration for unprivileged containers
-echo "Configuring security settings..."
-lxc config set "$CONTAINER_NAME" security.privileged false
-lxc config set "$CONTAINER_NAME" security.nesting true
-
-# Add network capabilities if needed
-echo "Adding network capabilities..."
-lxc config set "$CONTAINER_NAME" linux.kernel_modules "slick_nat"
-lxc config set "$CONTAINER_NAME" raw.lxc "
-lxc.cap.keep = sys_module net_admin net_raw
+lxc.cap.keep = net_admin net_raw
 lxc.aa_profile = unconfined
 "
 
+# Method 2: Alternative - shared mount namespace approach
+echo "Configuring security settings..."
+lxc config set "$CONTAINER_NAME" security.privileged false
+lxc config set "$CONTAINER_NAME" security.nesting true
+lxc config set "$CONTAINER_NAME" security.syscalls.intercept.mount true
+lxc config set "$CONTAINER_NAME" security.syscalls.intercept.mount.allowed "proc"
+
+# Method 3: Proxy device as fallback
+echo "Adding proxy device for proc access..."
+lxc config device add "$CONTAINER_NAME" slick-nat-proxy proxy \
+    listen="unix:/tmp/slick_nat_sock" \
+    connect="unix:/tmp/slick_nat_sock" \
+    bind=container || echo "Warning: Proxy device configuration failed"
+
 # Copy management script to container
 echo "Installing management script in container..."
-lxc file push /usr/local/bin/slnat "$CONTAINER_NAME/usr/local/bin/slnat"
-lxc exec "$CONTAINER_NAME" -- chmod +x /usr/local/bin/slnat
+if lxc info "$CONTAINER_NAME" | grep -q "Status: RUNNING"; then
+    lxc file push /usr/local/bin/slnat "$CONTAINER_NAME/usr/local/bin/slnat" 2>/dev/null || echo "Warning: Could not copy slnat script"
+    lxc exec "$CONTAINER_NAME" -- chmod +x /usr/local/bin/slnat 2>/dev/null || echo "Warning: Could not set permissions"
+else
+    echo "Container not running - will copy script after start"
+fi
 
 echo "Configuration complete!"
+echo ""
+echo "To start the container:"
+echo "  lxc start $CONTAINER_NAME"
 echo ""
 echo "To test the configuration:"
 echo "  lxc exec $CONTAINER_NAME -- slnat status"
 echo ""
-echo "Note: Container may need to be restarted for some changes to take effect"
+echo "If you encounter issues, try the alternative privileged method:"
+echo "  lxc config set $CONTAINER_NAME security.privileged true"
 echo "  lxc restart $CONTAINER_NAME"
