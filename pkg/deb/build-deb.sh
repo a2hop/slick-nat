@@ -222,7 +222,7 @@ find "${PACKAGE_DIR}" -type f ! -path "${PACKAGE_DIR}/DEBIAN/*" -exec md5sum {} 
 
 # Build the package
 echo "Building debian package..."
-DEB_FILENAME="${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
+DEB_FILENAME="slick-nat-dkms_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
 fakeroot dpkg-deb --build "${PACKAGE_DIR}" "${BUILD_DIR}/${DEB_FILENAME}"
 
 echo "Package built successfully: ${BUILD_DIR}/${DEB_FILENAME}"
