@@ -47,10 +47,11 @@ jobs:
         chmod +x build-deb.sh
         ./build-deb.sh
         
-        # Move package to root for easier access
-        cp build/${{ steps.version.outputs.deb_filename }} ../../
+        # Move package to project root for easier access
+        mv build/${{ steps.version.outputs.deb_filename }} ../../
         
-        # Verify package
+        # Verify package exists and show info
+        ls -la ../../${{ steps.version.outputs.deb_filename }}
         echo "Package information:"
         dpkg-deb --info ${{ steps.version.outputs.deb_filename }}
         echo ""
