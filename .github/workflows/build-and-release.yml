@@ -1,0 +1,210 @@
+name: Build and Release Slick NAT
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential devscripts debhelper dpkg-dev fakeroot
+        
+    - name: Extract version
+      id: version
+      run: |
+        # Extract version from module source
+        VERSION=$(grep -E '^MODULE_VERSION\(' src/slick-nat.c | sed 's/.*"\(.*\)".*/\1/')
+        if [ -z "$VERSION" ]; then
+          VERSION="0.0.3"  # Fallback version
+        fi
+        
+        # Generate architecture-aware filename
+        ARCH=$(dpkg --print-architecture)
+        DEB_FILENAME="slick-nat-dkms_${VERSION}_${ARCH}.deb"
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "deb_filename=$DEB_FILENAME" >> $GITHUB_OUTPUT
+        echo "architecture=$ARCH" >> $GITHUB_OUTPUT
+        
+        echo "Detected version: $VERSION"
+        echo "Package filename: $DEB_FILENAME"
+        echo "Architecture: $ARCH"
+        
+    - name: Build Debian package
+      run: |
+        cd pkg/deb
+        chmod +x build-deb.sh
+        ./build-deb.sh
+        
+        # Move package to root for easier access
+        cp build/${{ steps.version.outputs.deb_filename }} ../../
+        
+        # Verify package
+        echo "Package information:"
+        dpkg-deb --info ${{ steps.version.outputs.deb_filename }}
+        echo ""
+        echo "Package contents:"
+        dpkg-deb --contents ${{ steps.version.outputs.deb_filename }}
+        
+    - name: Get latest release
+      id: latest_release
+      uses: actions/github-script@v6
+      continue-on-error: true
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const { data: releases } = await github.rest.repos.listReleases({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+          });
+          
+          if (releases.length === 0) {
+            core.setOutput('has_release', 'false');
+            console.log('No releases found - skipping release upload');
+            return;
+          }
+          
+          const latestRelease = releases[0];
+          core.setOutput('has_release', 'true');
+          core.setOutput('release_id', latestRelease.id);
+          core.setOutput('release_tag', latestRelease.tag_name);
+          console.log(`Found latest release: ${latestRelease.tag_name} (ID: ${latestRelease.id})`);
+          
+    - name: Check if assets exist
+      id: check_assets
+      if: steps.latest_release.outputs.has_release == 'true'
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const releaseId = ${{ steps.latest_release.outputs.release_id }};
+          
+          const { data: assets } = await github.rest.repos.listReleaseAssets({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            release_id: releaseId
+          });
+          
+          const assetNames = [
+            'slnat',
+            '${{ steps.version.outputs.deb_filename }}'
+          ];
+          
+          const existingAssets = {};
+          for (const asset of assets) {
+            if (assetNames.includes(asset.name)) {
+              existingAssets[asset.name] = asset.id;
+            }
+          }
+          
+          core.setOutput('existing_assets', JSON.stringify(existingAssets));
+          console.log('Existing assets:', existingAssets);
+          
+    - name: Delete existing assets if they exist
+      if: steps.latest_release.outputs.has_release == 'true'
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const existingAssets = JSON.parse('${{ steps.check_assets.outputs.existing_assets }}');
+          
+          for (const [assetName, assetId] of Object.entries(existingAssets)) {
+            console.log(`Deleting existing asset: ${assetName}`);
+            await github.rest.repos.deleteReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              asset_id: parseInt(assetId)
+            });
+          }
+          
+    - name: Upload assets to release
+      if: steps.latest_release.outputs.has_release == 'true'
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const releaseId = '${{ steps.latest_release.outputs.release_id }}';
+          
+          const assets = [
+            { path: './src/slnat', name: 'slnat', contentType: 'application/octet-stream' },
+            { path: './${{ steps.version.outputs.deb_filename }}', name: '${{ steps.version.outputs.deb_filename }}', contentType: 'application/vnd.debian.binary-package' }
+          ];
+          
+          for (const asset of assets) {
+            console.log(`Uploading ${asset.name}...`);
+            const data = fs.readFileSync(asset.path);
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: parseInt(releaseId),
+              name: asset.name,
+              data: data
+            });
+            console.log(`Successfully uploaded ${asset.name}`);
+          }
+          
+    - name: Upload artifacts (no release)
+      if: steps.latest_release.outputs.has_release == 'false'
+      uses: actions/upload-artifact@v4
+      with:
+        name: slick-nat-build-${{ steps.version.outputs.version }}
+        path: |
+          src/slnat
+          ${{ steps.version.outputs.deb_filename }}
+        retention-days: 30
+        
+    - name: Create release summary
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Management Script**: slnat" >> $GITHUB_STEP_SUMMARY
+        echo "- **Debian Package**: ${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Architecture**: ${{ steps.version.outputs.architecture }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Package Contents" >> $GITHUB_STEP_SUMMARY
+        echo "- Kernel module source: /usr/src/slick-nat-${{ steps.version.outputs.version }}/" >> $GITHUB_STEP_SUMMARY
+        echo "- Management script: /usr/local/bin/slnat" >> $GITHUB_STEP_SUMMARY
+        echo "- Configuration: /etc/slnat/slnat.conf" >> $GITHUB_STEP_SUMMARY
+        echo "- Service: /lib/systemd/system/slnat.service" >> $GITHUB_STEP_SUMMARY
+        echo "- Documentation: /usr/share/doc/slick-nat-dkms/" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Installation" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Download and install the .deb package" >> $GITHUB_STEP_SUMMARY
+        echo "wget https://github.com/${{ github.repository }}/releases/download/\$TAG/${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "sudo dpkg -i ${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "sudo apt-get install -f  # Fix any dependency issues" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Verify installation" >> $GITHUB_STEP_SUMMARY
+        echo "lsmod | grep slick_nat" >> $GITHUB_STEP_SUMMARY
+        echo "slnat status" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Basic usage" >> $GITHUB_STEP_SUMMARY
+        echo "sudo slnat eth0 add 2001:db8:internal::/64 2001:db8:external::/64" >> $GITHUB_STEP_SUMMARY
+        echo "sudo slnat eth0 list" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Configuration-based management" >> $GITHUB_STEP_SUMMARY
+        echo "sudo nano /etc/slnat/slnat.conf" >> $GITHUB_STEP_SUMMARY
+        echo "sudo systemctl start slnat" >> $GITHUB_STEP_SUMMARY
+        echo "sudo systemctl enable slnat" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.latest_release.outputs.has_release }}" == "true" ]; then
+          echo "### Release" >> $GITHUB_STEP_SUMMARY
+          echo "Assets uploaded to release: ${{ steps.latest_release.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "No release found - assets uploaded as workflow artifacts" >> $GITHUB_STEP_SUMMARY
+        fi
