@@ -222,15 +222,13 @@ find "${PACKAGE_DIR}" -type f ! -path "${PACKAGE_DIR}/DEBIAN/*" -exec md5sum {} 
 
 # Build the package
 echo "Building debian package..."
-dpkg-deb --build "${PACKAGE_DIR}"
+DEB_FILENAME="${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
+fakeroot dpkg-deb --build "${PACKAGE_DIR}" "${BUILD_DIR}/${DEB_FILENAME}"
 
-# Move to final location with architecture in name
-mv "${PACKAGE_DIR}.deb" "${BUILD_DIR}/"
-
-echo "Package built successfully: ${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
+echo "Package built successfully: ${BUILD_DIR}/${DEB_FILENAME}"
 echo ""
 echo "To install:"
-echo "  sudo dpkg -i ${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
+echo "  sudo dpkg -i ${BUILD_DIR}/${DEB_FILENAME}"
 echo "  sudo apt-get install -f  # if dependencies are missing"
 echo ""
 echo "To test installation:"
