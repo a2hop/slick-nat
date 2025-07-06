@@ -3,11 +3,11 @@
 set -e
 
 # Package configuration
-PACKAGE_NAME="slick-nat-dkms"
+PACKAGE_NAME="slick-nat-ns"
 PACKAGE_VERSION="0.0.3"
-ARCHITECTURE="$(dpkg --print-architecture)"
+ARCHITECTURE="all"
 MAINTAINER="Slick NAT Project <lucas@xtec.one>"
-DESCRIPTION="Slick NAT - Bidirectional IPv6 NAT kernel module with DKMS support"
+DESCRIPTION="Slick NAT - Bidirectional IPv6 NAT Namespace module"
 
 # Build configuration
 BUILD_DIR="$(pwd)/build"
@@ -24,22 +24,14 @@ mkdir -p "${BUILD_DIR}"
 
 # Create package directory structure
 mkdir -p "${PACKAGE_DIR}/DEBIAN"
-mkdir -p "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}"
 mkdir -p "${PACKAGE_DIR}/usr/local/bin"
 mkdir -p "${PACKAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
-mkdir -p "${PACKAGE_DIR}/etc/modules-load.d"
 mkdir -p "${PACKAGE_DIR}/etc/slnat"
 mkdir -p "${PACKAGE_DIR}/usr/lib/slnat"
-
-# Copy source files
-echo "Copying source files..."
-cp -r "${SOURCE_DIR}/src/"* "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/"
-
-# Copy DKMS configuration
-cp "${SOURCE_DIR}/dkms/dkms.conf" "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/"
-cp "${SOURCE_DIR}/dkms/Makefile" "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/"
+mkdir -p "${PACKAGE_DIR}/lib/systemd/system"
 
 # Copy management script
+echo "Copying management script..."
 cp "${SOURCE_DIR}/src/slnat" "${PACKAGE_DIR}/usr/local/bin/"
 chmod +x "${PACKAGE_DIR}/usr/local/bin/slnat"
 
@@ -63,36 +55,29 @@ fi
 
 # Copy documentation
 cp "${SOURCE_DIR}/Readme.md" "${PACKAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/"
-cp "${SOURCE_DIR}/src/Maintain.md" "${PACKAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/"
-cp "${SOURCE_DIR}/dkms/README-DKMS.md" "${PACKAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/"
-
-# Create modules-load.d configuration
-cat > "${PACKAGE_DIR}/etc/modules-load.d/slick-nat.conf" << EOF
-# Slick NAT kernel module
-# Remove this file or comment out the line below to disable auto-loading
-slick_nat
-EOF
+if [ -f "${SOURCE_DIR}/src/Maintain.md" ]; then
+    cp "${SOURCE_DIR}/src/Maintain.md" "${PACKAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/"
+fi
 
 # Create template configuration file
 cat > "${PACKAGE_DIR}/etc/slnat/slnat.conf.template" << 'EOF'
-# Slick NAT Configuration Template
-# Copy this file to slnat.conf and customize for your network
+# Slick NAT Configuration Template (Container/Namespace Version)
+# Copy this file to slnat.conf and customize for your container network
 
-# Example configuration:
+# Example configuration for container environments:
 # Format: INTERFACE INTERNAL_PREFIX EXTERNAL_PREFIX
 # 
-# eth0 2001:db8:internal::/64 2001:db8:external::/64
-# wlan0 fd00:1234:5678::/64 2001:db8:wifi::/64
+# eth0 fd00:container::/64 2001:db8:external::/64
+# lxdbr0 fd00:lxd::/64 2001:db8:lxd::/64
 
-# Uncomment and modify the following lines for your network:
-# eth0 fd00::/64 2001:db8:1::/64
+# Common container network configurations:
+# eth0 172.17.0.0/16 192.168.100.0/24
 # docker0 172.17.0.0/16 192.168.100.0/24
-
-# Multiple interfaces can be configured:
-# eth0 fd00:internal::/64 2001:db8:external::/64
-# eth1 fd00:dmz::/64 2001:db8:dmz::/64
+# lxdbr0 10.0.0.0/24 192.168.200.0/24
 
 # Notes:
+# - This package is designed for container environments
+# - Requires slick-nat-dkms to be installed on the host
 # - Lines starting with # are comments
 # - Empty lines are ignored
 # - Each line should contain: interface internal_prefix external_prefix
@@ -100,10 +85,10 @@ cat > "${PACKAGE_DIR}/etc/slnat/slnat.conf.template" << 'EOF'
 # - IPv4 and IPv6 prefixes are supported
 EOF
 
-# Create example startup script
+# Create container-specific startup script
 cat > "${PACKAGE_DIR}/etc/slnat/load-routes.sh" << 'EOF'
 #!/bin/bash
-# Slick NAT Route Loading Script
+# Slick NAT Route Loading Script (Container Version)
 # This script loads NAT mappings from /etc/slnat/slnat.conf using slnat add-batch
 
 CONFIG_FILE="/etc/slnat/slnat.conf"
@@ -131,18 +116,17 @@ if [ ! -x "$SLNAT_CMD" ]; then
     exit 1
 fi
 
-# Check if module is loaded
+# Check if module is loaded (should be loaded on host)
 if ! lsmod | grep -q slick_nat; then
-    log_message "slick_nat module not loaded, attempting to load..."
-    if ! modprobe slick_nat; then
-        log_message "Failed to load slick_nat module"
-        exit 1
+    log_message "Warning: slick_nat module not loaded on host"
+    log_message "This package requires slick-nat-dkms to be installed on the host system"
+    if [ "$NON_INTERACTIVE" != "true" ]; then
+        log_message "Attempting to continue anyway..."
     fi
-    log_message "slick_nat module loaded successfully"
 fi
 
 if [ "$NON_INTERACTIVE" = "true" ]; then
-    log_message "Loading NAT mappings from $CONFIG_FILE (non-interactive mode)"
+    log_message "Loading NAT mappings from $CONFIG_FILE (container mode)"
 else
     log_message "Loading NAT mappings from $CONFIG_FILE using add-batch command"
 fi
@@ -160,26 +144,25 @@ if $SLNAT_CMD add-batch "$CONFIG_FILE"; then
     fi
 else
     log_message "Error: Failed to load NAT mappings from $CONFIG_FILE"
-    log_message "Check the configuration file format and try again"
+    log_message "Check the configuration file format and host module availability"
     exit 1
 fi
 EOF
 
 chmod +x "${PACKAGE_DIR}/etc/slnat/load-routes.sh"
 
-# Create systemd service file for automatic loading
-mkdir -p "${PACKAGE_DIR}/lib/systemd/system"
-cat > "${PACKAGE_DIR}/lib/systemd/system/slnat.service" << 'EOF'
+# Create systemd service file for container environments
+cat > "${PACKAGE_DIR}/lib/systemd/system/slnat-ns.service" << 'EOF'
 [Unit]
-Description=Slick NAT Route Loading Service
+Description=Slick NAT Route Loading Service (Container)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/etc/slnat/load-routes.sh
+ExecStart=/etc/slnat/load-routes.sh --non-interactive
 ExecStop=/usr/local/bin/slnat clear-all
-ExecReload=/bin/bash -c '/usr/local/bin/slnat clear-all && /etc/slnat/load-routes.sh'
+ExecReload=/bin/bash -c '/usr/local/bin/slnat clear-all && /etc/slnat/load-routes.sh --non-interactive'
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
@@ -222,9 +205,6 @@ cp postinst "${PACKAGE_DIR}/DEBIAN/"
 cp prerm "${PACKAGE_DIR}/DEBIAN/"
 cp postrm "${PACKAGE_DIR}/DEBIAN/"
 
-# Update control file with architecture
-sed -i "s/^Architecture:.*/Architecture: ${ARCHITECTURE}/" "${PACKAGE_DIR}/DEBIAN/control"
-
 # Make scripts executable
 chmod +x "${PACKAGE_DIR}/DEBIAN/postinst"
 chmod +x "${PACKAGE_DIR}/DEBIAN/prerm"
@@ -241,15 +221,18 @@ find "${PACKAGE_DIR}" -type f ! -path "${PACKAGE_DIR}/DEBIAN/*" -exec md5sum {} 
 
 # Build the package
 echo "Building debian package..."
-DEB_FILENAME="slick-nat-dkms_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
+DEB_FILENAME="slick-nat-ns_${PACKAGE_VERSION}_${ARCHITECTURE}.deb"
 fakeroot dpkg-deb --build "${PACKAGE_DIR}" "${BUILD_DIR}/${DEB_FILENAME}"
 
 echo "Package built successfully: ${BUILD_DIR}/${DEB_FILENAME}"
 echo ""
-echo "To install:"
+echo "Container package installation:"
 echo "  sudo dpkg -i ${BUILD_DIR}/${DEB_FILENAME}"
 echo "  sudo apt-get install -f  # if dependencies are missing"
 echo ""
-echo "To test installation:"
-echo "  lsmod | grep slick_nat"
+echo "Usage in containers:"
 echo "  slnat status"
+echo "  sudo systemctl enable slnat-ns"
+echo "  sudo systemctl start slnat-ns"
+echo ""
+echo "Note: This package requires slick-nat-dkms to be installed on the host system"

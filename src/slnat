@@ -4,133 +4,33 @@ PROC_FILE="/proc/net/slick_nat_mappings"
 PROC_BATCH_FILE="/proc/net/slick_nat_batch"
 MODULE_NAME="slick_nat"
 MODULES_LOAD_CONFIG="/etc/modules-load.d/slick-nat.conf"
+LXD_CONFIG_LIB="/usr/lib/slnat/lxd-config.sh"
+BATCH_LIB="/usr/lib/slnat/batch.sh"
+LXD_LIB="/usr/lib/slnat/lxd.sh"
 
 # Check if we're in a container
 is_container() {
     [ -f /.dockerenv ] || [ -n "${container}" ] || [ -f /run/.containerenv ] || grep -q container=lxc /proc/1/environ 2>/dev/null
 }
 
-# Check if module is loaded (works differently in containers)
-check_module() {
-    if [ ! -f "$PROC_FILE" ]; then
-        if is_container; then
-            echo "Error: Slick NAT module proc interface not available in container"
-            echo "This may be because:"
-            echo "1. Module is not loaded on the host"
-            echo "2. Container doesn't have access to the proc interface"
-            echo "3. Container is not in the correct network namespace"
-            echo ""
-            echo "On the host, run: sudo modprobe slick_nat"
-            echo "And configure LXD to expose the proc interface (see documentation)"
-        else
-            echo "Error: Slick NAT module not loaded"
-            echo "Load it with: sudo modprobe slick_nat"
-        fi
-        exit 1
-    fi
-}
-
-# Check container permissions
-check_container_permissions() {
-    if is_container; then
-        # Check if we can write to the proc file
-        if [ ! -w "$PROC_FILE" ]; then
-            echo "Warning: No write access to $PROC_FILE"
-            echo "Container may need additional privileges or device access"
-            echo "See documentation for LXD configuration"
-        fi
-        
-        # Check if we're in the right network namespace
-        if [ ! -d "/sys/class/net" ]; then
-            echo "Warning: Limited network namespace access"
-            echo "Some network operations may not work properly"
-        fi
-    fi
-}
-
-validate_batch_file() {
-    local file="$1"
-    local line_num=0
-    local errors=0
-    
-    if [ ! -f "$file" ]; then
-        echo "Error: File $file not found"
+# Source LXD library functions when needed
+source_lxd_lib() {
+    if [ -f "$LXD_LIB" ]; then
+        source "$LXD_LIB"
+    else
+        echo "Error: LXD library not found at $LXD_LIB"
+        echo "This may indicate an incomplete installation"
         return 1
     fi
-    
-    echo "Validating batch file: $file"
-    
-    while IFS= read -r line; do
-        line_num=$((line_num + 1))
-        
-        # Skip empty lines and comments
-        if [ -z "$line" ] || [[ "$line" =~ ^[[:space:]]*# ]]; then
-            continue
-        fi
-        
-        # Parse line for different commands
-        if [[ "$line" =~ ^(add|del|drop)[[:space:]]+([^[:space:]]+)([[:space:]]+([^[:space:]]+))?([[:space:]]+([^[:space:]]+))?$ ]]; then
-            local cmd="${BASH_REMATCH[1]}"
-            local interface="${BASH_REMATCH[2]}"
-            local internal="${BASH_REMATCH[4]}"
-            local external="${BASH_REMATCH[6]}"
-            
-            # Validate command
-            if [ "$cmd" != "add" ] && [ "$cmd" != "del" ] && [ "$cmd" != "drop" ]; then
-                echo "Line $line_num: Invalid command '$cmd'"
-                errors=$((errors + 1))
-                continue
-            fi
-            
-            # Validate add command has both prefixes
-            if [ "$cmd" = "add" ] && ([ -z "$internal" ] || [ -z "$external" ]); then
-                echo "Line $line_num: 'add' command requires both internal and external prefixes"
-                errors=$((errors + 1))
-                continue
-            fi
-            
-            # Validate del command has internal prefix
-            if [ "$cmd" = "del" ] && [ -z "$internal" ]; then
-                echo "Line $line_num: 'del' command requires internal prefix"
-                errors=$((errors + 1))
-                continue
-            fi
-            
-            # Validate drop command (only needs interface or --all)
-            if [ "$cmd" = "drop" ]; then
-                if [ "$interface" != "--all" ] && [ -z "$interface" ]; then
-                    echo "Line $line_num: 'drop' command requires interface name or --all"
-                    errors=$((errors + 1))
-                    continue
-                fi
-                # Drop doesn't need additional validation
-                continue
-            fi
-            
-            # Validate IPv6 prefix format (basic check) for add/del commands
-            if [[ ! "$internal" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
-                echo "Line $line_num: Invalid internal prefix format '$internal'"
-                errors=$((errors + 1))
-                continue
-            fi
-            
-            if [ "$cmd" = "add" ] && [[ ! "$external" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
-                echo "Line $line_num: Invalid external prefix format '$external'"
-                errors=$((errors + 1))
-                continue
-            fi
-            
-        else
-            echo "Line $line_num: Invalid syntax - '$line'"
-            errors=$((errors + 1))
-        fi
-    done < "$file"
-    
-    if [ $errors -eq 0 ]; then
-        echo "Validation passed: $line_num lines processed, 0 errors"
-        return 0
+}
+
+# Source batch library functions when needed
+source_batch_lib() {
+    if [ -f "$BATCH_LIB" ]; then
+        source "$BATCH_LIB"
     else
-        echo "Validation failed: $errors errors found"
+        echo "Error: Batch library not found at $BATCH_LIB"
+        echo "This may indicate an incomplete installation"
         return 1
     fi
 }
@@ -290,173 +190,6 @@ drop_mappings() {
 
 clear_all() {
     drop_mappings "--all" "true"
-}
-
-add_batch() {
-    local file="$1"
-    
-    if [ -z "$file" ]; then
-        echo "Usage: $0 add-batch <file>"
-        echo ""
-        echo "File format (one operation per line):"
-        echo "  add <interface> <internal_prefix/len> <external_prefix/len>"
-        echo "  del <interface> <internal_prefix/len>"
-        echo "  drop <interface>    - Drop all mappings for interface"
-        echo "  drop --all         - Drop all mappings"
-        echo "  # Comments are ignored"
-        echo ""
-        echo "Example:"
-        echo "  add eth0 2001:db8:internal:1::/64 2001:db8:external:1::/64"
-        echo "  add eth0 2001:db8:internal:2::/64 2001:db8:external:2::/64"
-        echo "  del eth0 2001:db8:internal:3::/64"
-        echo "  drop eth1"
-        echo "  drop --all"
-        return 1
-    fi
-    
-    check_module
-    check_container_permissions
-    
-    if [ ! -f "$PROC_BATCH_FILE" ]; then
-        echo "Error: Batch interface not available"
-        echo "This may indicate an older version of the kernel module"
-        return 1
-    fi
-    
-    # Validate file first
-    if ! validate_batch_file "$file"; then
-        echo "Batch file validation failed. Please fix errors and try again."
-        return 1
-    fi
-    
-    echo "Processing batch file: $file"
-    
-    # Count non-comment lines for progress
-    local total_lines=$(grep -v '^\s*#' "$file" | grep -v '^\s*$' | wc -l)
-    echo "Total operations to process: $total_lines"
-    
-    # Process the batch
-    if cat "$file" > "$PROC_BATCH_FILE" 2>/dev/null; then
-        echo "Batch operation completed successfully"
-        echo "Use '$0 status' to verify the mappings"
-        return 0
-    else
-        echo "Error: Batch operation failed"
-        echo "Check file format and permissions"
-        if is_container; then
-            echo "Container may need additional privileges (see documentation)"
-        fi
-        return 1
-    fi
-}
-
-del_batch() {
-    local file="$1"
-    
-    if [ -z "$file" ]; then
-        echo "Usage: $0 del-batch <file>"
-        echo ""
-        echo "File format (one operation per line):"
-        echo "  del <interface> <internal_prefix/len>"
-        echo "  drop <interface>    - Drop all mappings for interface"
-        echo "  drop --all         - Drop all mappings"
-        echo "  # Comments are ignored"
-        echo ""
-        echo "Example:"
-        echo "  del eth0 2001:db8:internal:1::/64"
-        echo "  del eth0 2001:db8:internal:2::/64"
-        echo "  drop eth1"
-        echo "  drop --all"
-        return 1
-    fi
-    
-    check_module
-    check_container_permissions
-    
-    if [ ! -f "$PROC_BATCH_FILE" ]; then
-        echo "Error: Batch interface not available"
-        echo "This may indicate an older version of the kernel module"
-        return 1
-    fi
-    
-    # Validate file first (allow only del and drop operations)
-    if ! validate_batch_file "$file"; then
-        echo "Batch file validation failed. Please fix errors and try again."
-        return 1
-    fi
-    
-    # Check that file contains only del and drop operations
-    if grep -v '^\s*#' "$file" | grep -v '^\s*$' | grep -v -E '^(del|drop) ' | head -1 > /dev/null; then
-        echo "Error: del-batch file can only contain 'del' and 'drop' operations"
-        return 1
-    fi
-    
-    echo "Processing batch delete file: $file"
-    
-    # Count non-comment lines for progress
-    local total_lines=$(grep -v '^\s*#' "$file" | grep -v '^\s*$' | wc -l)
-    echo "Total delete operations to process: $total_lines"
-    
-    # Process the batch
-    if cat "$file" > "$PROC_BATCH_FILE" 2>/dev/null; then
-        echo "Batch delete operation completed successfully"
-        echo "Use '$0 status' to verify the mappings were removed"
-        return 0
-    else
-        echo "Error: Batch delete operation failed"
-        echo "Check file format and permissions"
-        if is_container; then
-            echo "Container may need additional privileges (see documentation)"
-        fi
-        return 1
-    fi
-}
-
-create_batch_template() {
-    local file="$1"
-    
-    if [ -z "$file" ]; then
-        echo "Usage: $0 create-template <file>"
-        echo ""
-        echo "Creates a template batch file for editing"
-        return 1
-    fi
-    
-    if [ -f "$file" ]; then
-        echo "Error: File $file already exists"
-        return 1
-    fi
-    
-    cat > "$file" << 'EOF'
-# Slick NAT Batch Configuration Template
-# 
-# Format:
-#   add <interface> <internal_prefix/len> <external_prefix/len>
-#   del <interface> <internal_prefix/len>
-#   drop <interface>    - Drop all mappings for interface
-#   drop --all         - Drop all mappings
-#
-# Examples:
-#   add eth0 2001:db8:internal:1::/64 2001:db8:external:1::/64
-#   add eth0 2001:db8:internal:2::/64 2001:db8:external:2::/64
-#   del eth0 2001:db8:internal:3::/64
-#   drop eth1
-#   drop --all
-#
-# Notes:
-#   - Lines starting with # are ignored
-#   - Empty lines are ignored
-#   - Both prefixes must have the same prefix length for add operations
-#   - Interface must exist when the operation is processed
-#   - Drop operations will remove all mappings for the interface
-
-# Add your operations below:
-
-EOF
-    
-    echo "Template created: $file"
-    echo "Edit the file and use '$0 add-batch $file' to apply"
-    return 0
 }
 
 list_mappings() {
@@ -673,6 +406,7 @@ unload_module() {
 # Parse command line arguments
 case "$1" in
     status)
+        source_lxd_lib || exit 1
         status_info
         ;;
     load)
@@ -683,6 +417,10 @@ case "$1" in
         ;;
     clear-all)
         clear_all
+        ;;
+    lxd-config)
+        source_lxd_lib || exit 1
+        lxd_config "$2"
         ;;
     autoload)
         case "$2" in
@@ -707,19 +445,23 @@ case "$1" in
         esac
         ;;
     add-batch)
+        source_batch_lib || exit 1
         add_batch "$2"
         ;;
     del-batch)
+        source_batch_lib || exit 1
         del_batch "$2"
         ;;
     create-template)
+        source_batch_lib || exit 1
         create_batch_template "$2"
         ;;
     drop)
+        source_lxd_lib || exit 1
         drop_mappings "$2"
         ;;
     help|--help|-h)
-        echo "Usage: $0 [status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop] or $0 <interface> {add|del|list}"
+        echo "Usage: $0 [status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop|lxd-config] or $0 <interface> {add|del|list}"
         echo ""
         echo "Commands:"
         echo "  status                                    Show module status and mappings"
@@ -727,6 +469,7 @@ case "$1" in
         echo "  load                                      Load the kernel module"
         echo "  unload                                    Unload the kernel module"
         echo "  clear-all                                 Clear all NAT mappings (non-interactive)"
+        echo "  lxd-config <container>                    Configure LXD container for Slick NAT"
         echo "  autoload {enable|disable|status}         Manage automatic module loading"
         echo "  add-batch <file>                          Add mappings from batch file"
         echo "  del-batch <file>                          Delete mappings from batch file"
@@ -736,18 +479,16 @@ case "$1" in
         echo "  <interface> del <internal>                Remove single NAT mapping"
         echo "  <interface> list                          List mappings"
         echo ""
-        echo "Batch file format:"
-        echo "  add <interface> <internal_prefix/len> <external_prefix/len>"
-        echo "  del <interface> <internal_prefix/len>"
-        echo "  drop <interface>    - Drop all mappings for interface"
-        echo "  drop --all         - Drop all mappings"
-        echo "  # Comments are ignored"
+        echo "LXD Configuration:"
+        echo "  lxd-config <container>                    Configure container for Slick NAT access"
+        echo "                                            (must be run on LXD host)"
         echo ""
         echo "Examples:"
         echo "  $0 status"
         echo "  $0 load"
         echo "  $0 unload"
         echo "  $0 clear-all"
+        echo "  $0 lxd-config mycontainer"
         echo "  $0 drop --all"
         echo "  $0 drop eth0"
         echo "  $0 create-template /tmp/nat-config.txt"
@@ -761,18 +502,21 @@ case "$1" in
     *)
         if [ -z "$1" ]; then
             echo "Error: Missing arguments"
-            echo "Usage: $0 [status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop] or $0 <interface> {add|del|list}"
+            echo "Usage: $0 [status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop|lxd-config] or $0 <interface> {add|del|list}"
             exit 1
         fi
         
         case "$2" in
             add)
+                source_lxd_lib || exit 1
                 add_mapping "$1" "$3" "$4"
                 ;;
             del)
+                source_lxd_lib || exit 1
                 del_mapping "$1" "$3"
                 ;;
             list)
+                source_lxd_lib || exit 1
                 list_mappings
                 ;;
             *)
@@ -781,7 +525,7 @@ case "$1" in
                 echo "  <interface> del <internal_prefix/len>"
                 echo "  <interface> list"
                 echo ""
-                echo "Or use: $0 status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop"
+                echo "Or use: $0 status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop|lxd-config"
                 exit 1
         esac
         ;;

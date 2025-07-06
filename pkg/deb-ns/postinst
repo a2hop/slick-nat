@@ -1,0 +1,49 @@
+#!/bin/bash
+
+set -e
+
+case "$1" in
+    configure)
+        echo "Configuring slick-nat-ns (container version)..."
+        
+        # Create slnat.conf from template if it doesn't exist
+        if [ ! -f "/etc/slnat/slnat.conf" ]; then
+            echo "Creating default configuration file..."
+            cp "/etc/slnat/slnat.conf.template" "/etc/slnat/slnat.conf"
+            echo "Configuration template created at /etc/slnat/slnat.conf"
+            echo "Please edit this file to configure your NAT mappings"
+        fi
+        
+        # Enable systemd service
+        if command -v systemctl >/dev/null 2>&1; then
+            echo "Enabling slnat-ns service..."
+            systemctl daemon-reload
+            systemctl enable slnat-ns.service || true
+            echo "Service enabled - routes will be loaded automatically on boot"
+            echo "To load routes now: systemctl start slnat-ns"
+        fi
+        
+        echo ""
+        echo "Container Usage:"
+        echo "  Configure NAT: slnat <interface> add <internal_prefix> <external_prefix>"
+        echo "  List mappings: slnat <interface> list"
+        echo "  Check status: slnat status"
+        echo ""
+        echo "Configuration:"
+        echo "  Edit /etc/slnat/slnat.conf to configure automatic route loading"
+        echo "  Run /etc/slnat/load-routes.sh to load routes manually"
+        echo "  Use 'systemctl start slnat-ns' to load routes via systemd"
+        echo ""
+        echo "IMPORTANT: This package requires slick-nat-dkms to be installed on the host system"
+        ;;
+        
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+        
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

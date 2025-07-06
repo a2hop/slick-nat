@@ -38,16 +38,19 @@ jobs:
         # Generate architecture-aware filename
         ARCH=$(dpkg --print-architecture)
         DEB_FILENAME="slick-nat-dkms_${VERSION}_${ARCH}.deb"
+        NS_DEB_FILENAME="slick-nat-ns_${VERSION}_all.deb"
         
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "deb_filename=$DEB_FILENAME" >> $GITHUB_OUTPUT
+        echo "ns_deb_filename=$NS_DEB_FILENAME" >> $GITHUB_OUTPUT
         echo "architecture=$ARCH" >> $GITHUB_OUTPUT
         
         echo "Detected version: $VERSION"
-        echo "Package filename: $DEB_FILENAME"
+        echo "Main package filename: $DEB_FILENAME"
+        echo "Container package filename: $NS_DEB_FILENAME"
         echo "Architecture: $ARCH"
         
-    - name: Build Debian package
+    - name: Build Debian package (main)
       run: |
         cd pkg/deb
         chmod +x build-deb.sh
@@ -61,11 +64,28 @@ jobs:
         
         # Verify package exists and show info
         ls -la ${{ steps.version.outputs.deb_filename }}
-        echo "Package information:"
+        echo "Main package information:"
         dpkg-deb --info ${{ steps.version.outputs.deb_filename }}
+        
+    - name: Build Debian package (container)
+      run: |
+        cd pkg/deb-ns
+        chmod +x build-deb-ns.sh
+        ./build-deb-ns.sh
+        
+        # Move package to project root for easier access
+        mv build/${{ steps.version.outputs.ns_deb_filename }} ../../
+        
+        # Change back to project root for verification
+        cd ../../
+        
+        # Verify package exists and show info
+        ls -la ${{ steps.version.outputs.ns_deb_filename }}
+        echo "Container package information:"
+        dpkg-deb --info ${{ steps.version.outputs.ns_deb_filename }}
         echo ""
-        echo "Package contents:"
-        dpkg-deb --contents ${{ steps.version.outputs.deb_filename }}
+        echo "Container package contents:"
+        dpkg-deb --contents ${{ steps.version.outputs.ns_deb_filename }}
         
     - name: Get latest release
       id: latest_release
@@ -110,7 +130,8 @@ jobs:
           
           const assetNames = [
             'slnat',
-            '${{ steps.version.outputs.deb_filename }}'
+            '${{ steps.version.outputs.deb_filename }}',
+            '${{ steps.version.outputs.ns_deb_filename }}'
           ];
           
           const existingAssets = {};
@@ -157,6 +178,15 @@ jobs:
         asset_path: ./${{ steps.version.outputs.deb_filename }}
         asset_name: ${{ steps.version.outputs.deb_filename }}
         asset_content_type: application/vnd.debian.binary-package
+
+    - name: Upload container package to release
+      if: steps.latest_release.outputs.has_release == 'true'
+      uses: shogo82148/actions-upload-release-asset@v1
+      with:
+        upload_url: ${{ steps.latest_release.outputs.upload_url }}
+        asset_path: ./${{ steps.version.outputs.ns_deb_filename }}
+        asset_name: ${{ steps.version.outputs.ns_deb_filename }}
+        asset_content_type: application/vnd.debian.binary-package
           
     - name: Upload artifacts (no release)
       if: steps.latest_release.outputs.has_release == 'false'
@@ -166,6 +196,7 @@ jobs:
         path: |
           src/slnat
           ${{ steps.version.outputs.deb_filename }}
+          ${{ steps.version.outputs.ns_deb_filename }}
         retention-days: 30
         
     - name: Create release summary
@@ -173,19 +204,29 @@ jobs:
         echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Management Script**: slnat" >> $GITHUB_STEP_SUMMARY
-        echo "- **Debian Package**: ${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Main Package**: ${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Container Package**: ${{ steps.version.outputs.ns_deb_filename }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Architecture**: ${{ steps.version.outputs.architecture }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Package Contents" >> $GITHUB_STEP_SUMMARY
+        echo "**Main Package (slick-nat-dkms):**" >> $GITHUB_STEP_SUMMARY
         echo "- Kernel module source: /usr/src/slick-nat-${{ steps.version.outputs.version }}/" >> $GITHUB_STEP_SUMMARY
         echo "- Management script: /usr/local/bin/slnat" >> $GITHUB_STEP_SUMMARY
         echo "- Configuration: /etc/slnat/slnat.conf" >> $GITHUB_STEP_SUMMARY
         echo "- Service: /lib/systemd/system/slnat.service" >> $GITHUB_STEP_SUMMARY
         echo "- Documentation: /usr/share/doc/slick-nat-dkms/" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Container Package (slick-nat-ns):**" >> $GITHUB_STEP_SUMMARY
+        echo "- Management script: /usr/local/bin/slnat" >> $GITHUB_STEP_SUMMARY
+        echo "- Configuration: /etc/slnat/slnat.conf" >> $GITHUB_STEP_SUMMARY
+        echo "- Service: /lib/systemd/system/slnat-ns.service" >> $GITHUB_STEP_SUMMARY
+        echo "- Helper libraries: /usr/lib/slnat/" >> $GITHUB_STEP_SUMMARY
+        echo "- Documentation: /usr/share/doc/slick-nat-ns/" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Installation" >> $GITHUB_STEP_SUMMARY
+        echo "**Host Installation:**" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "# Download and install the .deb package" >> $GITHUB_STEP_SUMMARY
+        echo "# Download and install the main package on host" >> $GITHUB_STEP_SUMMARY
         echo "wget https://github.com/${{ github.repository }}/releases/download/\$TAG/${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
         echo "sudo dpkg -i ${{ steps.version.outputs.deb_filename }}" >> $GITHUB_STEP_SUMMARY
         echo "sudo apt-get install -f  # Fix any dependency issues" >> $GITHUB_STEP_SUMMARY
@@ -193,20 +234,41 @@ jobs:
         echo "# Verify installation" >> $GITHUB_STEP_SUMMARY
         echo "lsmod | grep slick_nat" >> $GITHUB_STEP_SUMMARY
         echo "slnat status" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "# Basic usage" >> $GITHUB_STEP_SUMMARY
+        echo "**Container Installation:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Download and install the container package in containers" >> $GITHUB_STEP_SUMMARY
+        echo "wget https://github.com/${{ github.repository }}/releases/download/\$TAG/${{ steps.version.outputs.ns_deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "sudo dpkg -i ${{ steps.version.outputs.ns_deb_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "sudo apt-get install -f  # Fix any dependency issues" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Configure and start" >> $GITHUB_STEP_SUMMARY
+        echo "sudo nano /etc/slnat/slnat.conf" >> $GITHUB_STEP_SUMMARY
+        echo "sudo systemctl start slnat-ns" >> $GITHUB_STEP_SUMMARY
+        echo "sudo systemctl enable slnat-ns" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Usage" >> $GITHUB_STEP_SUMMARY
+        echo "**Basic Commands:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Configure NAT mapping" >> $GITHUB_STEP_SUMMARY
         echo "sudo slnat eth0 add 2001:db8:internal::/64 2001:db8:external::/64" >> $GITHUB_STEP_SUMMARY
         echo "sudo slnat eth0 list" >> $GITHUB_STEP_SUMMARY
+        echo "slnat status" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "# Configuration-based management" >> $GITHUB_STEP_SUMMARY
         echo "sudo nano /etc/slnat/slnat.conf" >> $GITHUB_STEP_SUMMARY
-        echo "sudo systemctl start slnat" >> $GITHUB_STEP_SUMMARY
-        echo "sudo systemctl enable slnat" >> $GITHUB_STEP_SUMMARY
+        echo "sudo systemctl start slnat      # For host" >> $GITHUB_STEP_SUMMARY
+        echo "sudo systemctl start slnat-ns   # For containers" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         if [ "${{ steps.latest_release.outputs.has_release }}" == "true" ]; then
           echo "### Release" >> $GITHUB_STEP_SUMMARY
           echo "Assets uploaded to release: ${{ steps.latest_release.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **slnat**: Management script" >> $GITHUB_STEP_SUMMARY
+          echo "- **${{ steps.version.outputs.deb_filename }}**: Main package (host)" >> $GITHUB_STEP_SUMMARY
+          echo "- **${{ steps.version.outputs.ns_deb_filename }}**: Container package" >> $GITHUB_STEP_SUMMARY
         else
           echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "No release found - assets uploaded as workflow artifacts" >> $GITHUB_STEP_SUMMARY

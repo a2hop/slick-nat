@@ -1,0 +1,47 @@
+#!/bin/bash
+
+set -e
+
+case "$1" in
+    remove)
+        echo "Cleaning up slick-nat-ns..."
+        
+        # Disable systemd service if it exists
+        if command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-enabled slnat-ns.service >/dev/null 2>&1; then
+                echo "Disabling slnat-ns service..."
+                systemctl disable slnat-ns.service || true
+            fi
+            systemctl daemon-reload || true
+        fi
+        ;;
+        
+    purge)
+        echo "Purging slick-nat-ns configuration..."
+        
+        # Remove configuration directory
+        if [ -d "/etc/slnat" ]; then
+            echo "Removing configuration directory..."
+            rm -rf "/etc/slnat"
+        fi
+        
+        # Remove systemd service file
+        if [ -f "/lib/systemd/system/slnat-ns.service" ]; then
+            echo "Removing systemd service file..."
+            rm -f "/lib/systemd/system/slnat-ns.service"
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload || true
+            fi
+        fi
+        ;;
+        
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+        
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

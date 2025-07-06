@@ -1,0 +1,29 @@
+Package: slick-nat-ns
+Version: 0.0.3
+Section: networking
+Priority: optional
+Architecture: all
+Suggests: iproute2, iputils-ping, slick-nat-dkms
+Installed-Size: 1024
+Maintainer: Slick NAT Project <lucas@xtec.one>
+Description: Slick NAT - Container/Namespace userspace tools
+ Userspace tools for Slick NAT designed for container environments.
+ This package provides the management interface and configuration
+ system without the kernel module (which should be installed on the host).
+ .
+ Features:
+  * Container-optimized NAT configuration management
+  * Systemd service integration for containers
+  * Batch configuration loading
+  * LXD/Docker integration helpers
+  * Per-namespace configuration support
+ .
+ This package is designed to be installed inside containers while
+ slick-nat-dkms is installed on the host system.
+ .
+ Container environments supported:
+  * LXD containers
+  * Docker containers
+  * System containers
+  * Network namespaces
+Homepage: https://github.com/a2hop/slick-nat

@@ -5,7 +5,7 @@ Priority: optional
 Architecture: all
 Depends: dkms (>= 2.2), linux-headers-generic | linux-headers-amd64 | linux-headers
 Recommends: build-essential, linux-libc-dev
-Suggests: iproute2, iputils-ping
+Suggests: iproute2, iputils-ping, slick-nat-ns
 Installed-Size: 1024
 Maintainer: Slick NAT Project <lucas@xtec.one>
 Description: Slick NAT - Bidirectional IPv6 NAT kernel module
@@ -23,4 +23,6 @@ Description: Slick NAT - Bidirectional IPv6 NAT kernel module
  .
  This package uses DKMS to automatically build the kernel module for
  your system and rebuild it when kernel updates are installed.
+ .
+ For container environments, also install slick-nat-ns package.
 Homepage: https://github.com/a2hop/slick-nat

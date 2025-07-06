@@ -1,0 +1,33 @@
+#!/bin/bash
+
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        echo "Preparing to remove slick-nat-ns..."
+        
+        # Stop the systemd service if it's running
+        if command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-active --quiet slnat-ns.service 2>/dev/null; then
+                echo "Stopping slnat-ns service..."
+                systemctl stop slnat-ns.service || true
+            fi
+        fi
+        
+        # Clear existing mappings
+        echo "Clearing existing NAT mappings..."
+        if [ -x "/usr/local/bin/slnat" ]; then
+            /usr/local/bin/slnat clear-all || true
+        fi
+        ;;
+        
+    failed-upgrade)
+        ;;
+        
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
