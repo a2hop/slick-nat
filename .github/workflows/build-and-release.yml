@@ -7,6 +7,12 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# Add explicit permissions for the workflow
+permissions:
+  contents: write  # Required to upload release assets
+  actions: read    # Required to read workflow artifacts
+  checks: write    # Required to create check runs
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -83,7 +89,9 @@ jobs:
           core.setOutput('has_release', 'true');
           core.setOutput('release_id', latestRelease.id);
           core.setOutput('release_tag', latestRelease.tag_name);
+          core.setOutput('upload_url', latestRelease.upload_url);
           console.log(`Found latest release: ${latestRelease.tag_name} (ID: ${latestRelease.id})`);
+          console.log(`Upload URL: ${latestRelease.upload_url}`);
           
     - name: Check if assets exist
       id: check_assets
@@ -132,32 +140,27 @@ jobs:
             });
           }
           
-    - name: Upload assets to release
+    - name: Upload management script to release
       if: steps.latest_release.outputs.has_release == 'true'
-      uses: actions/github-script@v6
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          const fs = require('fs');
-          const releaseId = '${{ steps.latest_release.outputs.release_id }}';
-          
-          const assets = [
-            { path: './src/slnat', name: 'slnat', contentType: 'application/octet-stream' },
-            { path: './${{ steps.version.outputs.deb_filename }}', name: '${{ steps.version.outputs.deb_filename }}', contentType: 'application/vnd.debian.binary-package' }
-          ];
-          
-          for (const asset of assets) {
-            console.log(`Uploading ${asset.name}...`);
-            const data = fs.readFileSync(asset.path);
-            await github.rest.repos.uploadReleaseAsset({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: parseInt(releaseId),
-              name: asset.name,
-              data: data
-            });
-            console.log(`Successfully uploaded ${asset.name}`);
-          }
+        upload_url: ${{ steps.latest_release.outputs.upload_url }}
+        asset_path: ./src/slnat
+        asset_name: slnat
+        asset_content_type: application/octet-stream
+        
+    - name: Upload Debian package to release
+      if: steps.latest_release.outputs.has_release == 'true'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.latest_release.outputs.upload_url }}
+        asset_path: ./${{ steps.version.outputs.deb_filename }}
+        asset_name: ${{ steps.version.outputs.deb_filename }}
+        asset_content_type: application/vnd.debian.binary-package
           
     - name: Upload artifacts (no release)
       if: steps.latest_release.outputs.has_release == 'false'
