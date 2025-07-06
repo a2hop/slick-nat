@@ -1,0 +1,72 @@
+#!/bin/bash
+
+set -e
+
+PACKAGE_NAME="slick-nat"
+PACKAGE_VERSION="0.0.3"
+MODULE_NAME="slick_nat"
+
+case "$1" in
+    remove)
+        echo "Cleaning up slick-nat-dkms..."
+        
+        # Disable systemd service if it exists
+        if command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-enabled slnat.service >/dev/null 2>&1; then
+                echo "Disabling slnat service..."
+                systemctl disable slnat.service || true
+            fi
+            systemctl daemon-reload || true
+        fi
+        
+        # Remove any remaining DKMS traces
+        if dkms status 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
+            echo "Removing any remaining DKMS entries..."
+            dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
+        fi
+        
+        # Remove source directory if it exists
+        if [ -d "/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}" ]; then
+            echo "Removing source directory..."
+            rm -rf "/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
+        fi
+        ;;
+        
+    purge)
+        echo "Purging slick-nat-dkms configuration..."
+        
+        # Remove configuration files
+        rm -f "/etc/modules-load.d/slick-nat.conf"
+        
+        # Remove configuration directory
+        if [ -d "/etc/slnat" ]; then
+            echo "Removing configuration directory..."
+            rm -rf "/etc/slnat"
+        fi
+        
+        # Remove systemd service file
+        if [ -f "/lib/systemd/system/slnat.service" ]; then
+            echo "Removing systemd service file..."
+            rm -f "/lib/systemd/system/slnat.service"
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload || true
+            fi
+        fi
+        
+        # Remove any remaining proc entries (shouldn't exist after module unload)
+        # This is just cleanup in case something went wrong
+        if [ -f "/proc/net/slick_nat_mappings" ]; then
+            echo "Warning: Proc entry still exists after module removal"
+        fi
+        ;;
+        
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+        
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

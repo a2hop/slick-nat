@@ -1,0 +1,26 @@
+Package: slick-nat-dkms
+Version: 0.0.3
+Section: kernel
+Priority: optional
+Architecture: all
+Depends: dkms (>= 2.2), linux-headers-generic | linux-headers-amd64 | linux-headers
+Recommends: build-essential, linux-libc-dev
+Suggests: iproute2, iputils-ping
+Installed-Size: 1024
+Maintainer: Slick NAT Project <lucas@xtec.one>
+Description: Slick NAT - Bidirectional IPv6 NAT kernel module
+ A high-performance IPv6 NAT kernel module that provides bidirectional
+ address translation with dynamic mapping configuration and per-namespace
+ support.
+ .
+ Features:
+  * Bidirectional IPv6 NAT with dynamic configuration
+  * Per-Network Namespace support for containers
+  * Container support (LXD, Docker)
+  * Neighbor Discovery Protocol proxy
+  * ICMP error handling with embedded packet translation
+  * Interface-specific mappings
+ .
+ This package uses DKMS to automatically build the kernel module for
+ your system and rebuild it when kernel updates are installed.
+Homepage: https://github.com/a2hop/slick-nat

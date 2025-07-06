@@ -1,10 +1,9 @@
-# Install dependencies (Ubuntu/Debian)
-sudo apt update
-sudo apt install -y clang llvm libbpf-dev linux-headers-$(uname -r) linux-headers-generic linux-libc-dev iproute2 build-essential
-
-make clean
-# Build
+#!/bin/bash
+set -e
+echo "Building Slick NAT kernel module..."
 make
-
-# Install and run
-#sudo make install
+echo "Build complete."
+echo ""
+echo "To load the module: ./loader.sh load"
+echo "To configure NAT:   ./src/slnat <interface> add <internal> <external>"
+echo "To check status:    ./src/slnat status"

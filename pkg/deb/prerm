@@ -1,0 +1,53 @@
+#!/bin/bash
+
+set -e
+
+PACKAGE_NAME="slick-nat"
+PACKAGE_VERSION="0.0.3"
+MODULE_NAME="slick_nat"
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        echo "Preparing to remove slick-nat-dkms..."
+        
+        # Stop the systemd service if it's running
+        if command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-active --quiet slnat.service 2>/dev/null; then
+                echo "Stopping slnat service..."
+                systemctl stop slnat.service || true
+            fi
+        fi
+        
+        # Clear existing mappings before unloading module
+        if lsmod | grep -q "${MODULE_NAME}"; then
+            echo "Clearing existing NAT mappings..."
+            if [ -x "/usr/local/bin/slnat" ]; then
+                /usr/local/bin/slnat clear-all || true
+            fi
+        fi
+        
+        # Unload the module if loaded
+        if lsmod | grep -q "${MODULE_NAME}"; then
+            echo "Unloading module..."
+            modprobe -r "${MODULE_NAME}" || true
+        fi
+        
+        # Remove from DKMS only on remove, not upgrade
+        if [ "$1" = "remove" ]; then
+            if dkms status 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
+                echo "Removing module from DKMS..."
+                dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
+            fi
+        fi
+        ;;
+        
+    failed-upgrade)
+        ;;
+        
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,788 @@
+#!/bin/bash
+
+PROC_FILE="/proc/net/slick_nat_mappings"
+PROC_BATCH_FILE="/proc/net/slick_nat_batch"
+MODULE_NAME="slick_nat"
+MODULES_LOAD_CONFIG="/etc/modules-load.d/slick-nat.conf"
+
+# Check if we're in a container
+is_container() {
+    [ -f /.dockerenv ] || [ -n "${container}" ] || [ -f /run/.containerenv ] || grep -q container=lxc /proc/1/environ 2>/dev/null
+}
+
+# Check if module is loaded (works differently in containers)
+check_module() {
+    if [ ! -f "$PROC_FILE" ]; then
+        if is_container; then
+            echo "Error: Slick NAT module proc interface not available in container"
+            echo "This may be because:"
+            echo "1. Module is not loaded on the host"
+            echo "2. Container doesn't have access to the proc interface"
+            echo "3. Container is not in the correct network namespace"
+            echo ""
+            echo "On the host, run: sudo modprobe slick_nat"
+            echo "And configure LXD to expose the proc interface (see documentation)"
+        else
+            echo "Error: Slick NAT module not loaded"
+            echo "Load it with: sudo modprobe slick_nat"
+        fi
+        exit 1
+    fi
+}
+
+# Check container permissions
+check_container_permissions() {
+    if is_container; then
+        # Check if we can write to the proc file
+        if [ ! -w "$PROC_FILE" ]; then
+            echo "Warning: No write access to $PROC_FILE"
+            echo "Container may need additional privileges or device access"
+            echo "See documentation for LXD configuration"
+        fi
+        
+        # Check if we're in the right network namespace
+        if [ ! -d "/sys/class/net" ]; then
+            echo "Warning: Limited network namespace access"
+            echo "Some network operations may not work properly"
+        fi
+    fi
+}
+
+validate_batch_file() {
+    local file="$1"
+    local line_num=0
+    local errors=0
+    
+    if [ ! -f "$file" ]; then
+        echo "Error: File $file not found"
+        return 1
+    fi
+    
+    echo "Validating batch file: $file"
+    
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        
+        # Skip empty lines and comments
+        if [ -z "$line" ] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        
+        # Parse line for different commands
+        if [[ "$line" =~ ^(add|del|drop)[[:space:]]+([^[:space:]]+)([[:space:]]+([^[:space:]]+))?([[:space:]]+([^[:space:]]+))?$ ]]; then
+            local cmd="${BASH_REMATCH[1]}"
+            local interface="${BASH_REMATCH[2]}"
+            local internal="${BASH_REMATCH[4]}"
+            local external="${BASH_REMATCH[6]}"
+            
+            # Validate command
+            if [ "$cmd" != "add" ] && [ "$cmd" != "del" ] && [ "$cmd" != "drop" ]; then
+                echo "Line $line_num: Invalid command '$cmd'"
+                errors=$((errors + 1))
+                continue
+            fi
+            
+            # Validate add command has both prefixes
+            if [ "$cmd" = "add" ] && ([ -z "$internal" ] || [ -z "$external" ]); then
+                echo "Line $line_num: 'add' command requires both internal and external prefixes"
+                errors=$((errors + 1))
+                continue
+            fi
+            
+            # Validate del command has internal prefix
+            if [ "$cmd" = "del" ] && [ -z "$internal" ]; then
+                echo "Line $line_num: 'del' command requires internal prefix"
+                errors=$((errors + 1))
+                continue
+            fi
+            
+            # Validate drop command (only needs interface or --all)
+            if [ "$cmd" = "drop" ]; then
+                if [ "$interface" != "--all" ] && [ -z "$interface" ]; then
+                    echo "Line $line_num: 'drop' command requires interface name or --all"
+                    errors=$((errors + 1))
+                    continue
+                fi
+                # Drop doesn't need additional validation
+                continue
+            fi
+            
+            # Validate IPv6 prefix format (basic check) for add/del commands
+            if [[ ! "$internal" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                echo "Line $line_num: Invalid internal prefix format '$internal'"
+                errors=$((errors + 1))
+                continue
+            fi
+            
+            if [ "$cmd" = "add" ] && [[ ! "$external" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                echo "Line $line_num: Invalid external prefix format '$external'"
+                errors=$((errors + 1))
+                continue
+            fi
+            
+        else
+            echo "Line $line_num: Invalid syntax - '$line'"
+            errors=$((errors + 1))
+        fi
+    done < "$file"
+    
+    if [ $errors -eq 0 ]; then
+        echo "Validation passed: $line_num lines processed, 0 errors"
+        return 0
+    else
+        echo "Validation failed: $errors errors found"
+        return 1
+    fi
+}
+
+add_mapping() {
+    local interface="$1"
+    local internal="$2"
+    local external="$3"
+    
+    if [ -z "$interface" ] || [ -z "$internal" ] || [ -z "$external" ]; then
+        echo "Usage: $0 <interface> add <internal_prefix/len> <external_prefix/len>"
+        return 1
+    fi
+    
+    check_module
+    check_container_permissions
+    
+    # Check if interface exists (may not be visible in container)
+    if [ -d "/sys/class/net" ] && [ ! -d "/sys/class/net/$interface" ]; then
+        echo "Warning: Interface $interface not found in this namespace"
+        echo "This may be normal if running in a container"
+    fi
+    
+    # Check if mapping already exists
+    if grep -q "^$interface $internal" "$PROC_FILE" 2>/dev/null; then
+        echo "Error: Mapping for $internal on $interface already exists"
+        return 1
+    fi
+    
+    echo "add $interface $internal $external" > "$PROC_FILE" 2>/dev/null
+    case $? in
+        0)
+            echo "Added mapping on $interface: $internal -> $external"
+            # Verify the mapping was added
+            if grep -q "^$interface $internal" "$PROC_FILE" 2>/dev/null; then
+                echo "Mapping confirmed in kernel"
+            else
+                echo "Warning: Mapping may not have been added properly"
+            fi
+            ;;
+        1)
+            echo "Error: Failed to add mapping - invalid format or duplicate entry"
+            return 1
+            ;;
+        *)
+            echo "Error: Failed to add mapping - check format and permissions"
+            if is_container; then
+                echo "Container may need additional privileges (see documentation)"
+            fi
+            return 1
+            ;;
+    esac
+}
+
+del_mapping() {
+    local interface="$1"
+    local internal="$2"
+    
+    if [ -z "$interface" ] || [ -z "$internal" ]; then
+        echo "Usage: $0 <interface> del <internal_prefix/len>"
+        return 1
+    fi
+    
+    check_module
+    check_container_permissions
+    
+    # Check if mapping exists
+    if ! grep -q "^$interface $internal" "$PROC_FILE" 2>/dev/null; then
+        echo "Error: Mapping for $internal on $interface does not exist"
+        return 1
+    fi
+    
+    echo "del $interface $internal" > "$PROC_FILE" 2>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "Deleted mapping on $interface: $internal"
+    else
+        echo "Error: Failed to delete mapping - check format and permissions"
+        return 1
+    fi
+}
+
+drop_mappings() {
+    local target="$1"
+    local non_interactive="${2:-false}"
+    
+    if [ -z "$target" ]; then
+        echo "Usage: $0 drop {--all|<interface>}"
+        echo ""
+        echo "Commands:"
+        echo "  drop --all        Drop all NAT mappings in this namespace"
+        echo "  drop <interface>  Drop all NAT mappings for specific interface"
+        echo ""
+        echo "Examples:"
+        echo "  $0 drop --all"
+        echo "  $0 drop eth0"
+        return 1
+    fi
+    
+    check_module
+    check_container_permissions
+    
+    if [ "$target" = "--all" ]; then
+        # Show current mappings before dropping (unless non-interactive)
+        if [ "$non_interactive" != "true" ]; then
+            echo "Current mappings to be dropped:"
+            if [ -f "$PROC_FILE" ]; then
+                cat "$PROC_FILE"
+            fi
+            
+            echo ""
+            read -p "Are you sure you want to drop ALL mappings? (y/N): " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "Operation cancelled"
+                return 1
+            fi
+        fi
+        
+        echo "drop --all" > "$PROC_FILE" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            if [ "$non_interactive" != "true" ]; then
+                echo "All NAT mappings dropped successfully"
+            fi
+        else
+            echo "Error: Failed to drop all mappings"
+            return 1
+        fi
+    else
+        # Drop for specific interface
+        if [ "$non_interactive" != "true" ]; then
+            # Show current mappings for the interface
+            echo "Current mappings for interface $target to be dropped:"
+            if [ -f "$PROC_FILE" ]; then
+                grep "^$target " "$PROC_FILE" || echo "No mappings found for interface $target"
+            fi
+            
+            echo ""
+            read -p "Are you sure you want to drop all mappings for interface $target? (y/N): " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "Operation cancelled"
+                return 1
+            fi
+        fi
+        
+        echo "drop $target" > "$PROC_FILE" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            if [ "$non_interactive" != "true" ]; then
+                echo "All NAT mappings for interface $target dropped successfully"
+            fi
+        else
+            echo "Error: Failed to drop mappings for interface $target"
+            return 1
+        fi
+    fi
+}
+
+clear_all() {
+    drop_mappings "--all" "true"
+}
+
+add_batch() {
+    local file="$1"
+    
+    if [ -z "$file" ]; then
+        echo "Usage: $0 add-batch <file>"
+        echo ""
+        echo "File format (one operation per line):"
+        echo "  add <interface> <internal_prefix/len> <external_prefix/len>"
+        echo "  del <interface> <internal_prefix/len>"
+        echo "  drop <interface>    - Drop all mappings for interface"
+        echo "  drop --all         - Drop all mappings"
+        echo "  # Comments are ignored"
+        echo ""
+        echo "Example:"
+        echo "  add eth0 2001:db8:internal:1::/64 2001:db8:external:1::/64"
+        echo "  add eth0 2001:db8:internal:2::/64 2001:db8:external:2::/64"
+        echo "  del eth0 2001:db8:internal:3::/64"
+        echo "  drop eth1"
+        echo "  drop --all"
+        return 1
+    fi
+    
+    check_module
+    check_container_permissions
+    
+    if [ ! -f "$PROC_BATCH_FILE" ]; then
+        echo "Error: Batch interface not available"
+        echo "This may indicate an older version of the kernel module"
+        return 1
+    fi
+    
+    # Validate file first
+    if ! validate_batch_file "$file"; then
+        echo "Batch file validation failed. Please fix errors and try again."
+        return 1
+    fi
+    
+    echo "Processing batch file: $file"
+    
+    # Count non-comment lines for progress
+    local total_lines=$(grep -v '^\s*#' "$file" | grep -v '^\s*$' | wc -l)
+    echo "Total operations to process: $total_lines"
+    
+    # Process the batch
+    if cat "$file" > "$PROC_BATCH_FILE" 2>/dev/null; then
+        echo "Batch operation completed successfully"
+        echo "Use '$0 status' to verify the mappings"
+        return 0
+    else
+        echo "Error: Batch operation failed"
+        echo "Check file format and permissions"
+        if is_container; then
+            echo "Container may need additional privileges (see documentation)"
+        fi
+        return 1
+    fi
+}
+
+del_batch() {
+    local file="$1"
+    
+    if [ -z "$file" ]; then
+        echo "Usage: $0 del-batch <file>"
+        echo ""
+        echo "File format (one operation per line):"
+        echo "  del <interface> <internal_prefix/len>"
+        echo "  drop <interface>    - Drop all mappings for interface"
+        echo "  drop --all         - Drop all mappings"
+        echo "  # Comments are ignored"
+        echo ""
+        echo "Example:"
+        echo "  del eth0 2001:db8:internal:1::/64"
+        echo "  del eth0 2001:db8:internal:2::/64"
+        echo "  drop eth1"
+        echo "  drop --all"
+        return 1
+    fi
+    
+    check_module
+    check_container_permissions
+    
+    if [ ! -f "$PROC_BATCH_FILE" ]; then
+        echo "Error: Batch interface not available"
+        echo "This may indicate an older version of the kernel module"
+        return 1
+    fi
+    
+    # Validate file first (allow only del and drop operations)
+    if ! validate_batch_file "$file"; then
+        echo "Batch file validation failed. Please fix errors and try again."
+        return 1
+    fi
+    
+    # Check that file contains only del and drop operations
+    if grep -v '^\s*#' "$file" | grep -v '^\s*$' | grep -v -E '^(del|drop) ' | head -1 > /dev/null; then
+        echo "Error: del-batch file can only contain 'del' and 'drop' operations"
+        return 1
+    fi
+    
+    echo "Processing batch delete file: $file"
+    
+    # Count non-comment lines for progress
+    local total_lines=$(grep -v '^\s*#' "$file" | grep -v '^\s*$' | wc -l)
+    echo "Total delete operations to process: $total_lines"
+    
+    # Process the batch
+    if cat "$file" > "$PROC_BATCH_FILE" 2>/dev/null; then
+        echo "Batch delete operation completed successfully"
+        echo "Use '$0 status' to verify the mappings were removed"
+        return 0
+    else
+        echo "Error: Batch delete operation failed"
+        echo "Check file format and permissions"
+        if is_container; then
+            echo "Container may need additional privileges (see documentation)"
+        fi
+        return 1
+    fi
+}
+
+create_batch_template() {
+    local file="$1"
+    
+    if [ -z "$file" ]; then
+        echo "Usage: $0 create-template <file>"
+        echo ""
+        echo "Creates a template batch file for editing"
+        return 1
+    fi
+    
+    if [ -f "$file" ]; then
+        echo "Error: File $file already exists"
+        return 1
+    fi
+    
+    cat > "$file" << 'EOF'
+# Slick NAT Batch Configuration Template
+# 
+# Format:
+#   add <interface> <internal_prefix/len> <external_prefix/len>
+#   del <interface> <internal_prefix/len>
+#   drop <interface>    - Drop all mappings for interface
+#   drop --all         - Drop all mappings
+#
+# Examples:
+#   add eth0 2001:db8:internal:1::/64 2001:db8:external:1::/64
+#   add eth0 2001:db8:internal:2::/64 2001:db8:external:2::/64
+#   del eth0 2001:db8:internal:3::/64
+#   drop eth1
+#   drop --all
+#
+# Notes:
+#   - Lines starting with # are ignored
+#   - Empty lines are ignored
+#   - Both prefixes must have the same prefix length for add operations
+#   - Interface must exist when the operation is processed
+#   - Drop operations will remove all mappings for the interface
+
+# Add your operations below:
+
+EOF
+    
+    echo "Template created: $file"
+    echo "Edit the file and use '$0 add-batch $file' to apply"
+    return 0
+}
+
+list_mappings() {
+    check_module
+    
+    if [ -f "$PROC_FILE" ]; then
+        echo "Current NAT mappings:"
+        if is_container; then
+            echo "(Container view - namespace-specific mappings)"
+        else
+            echo "(Host view - host namespace mappings)"
+        fi
+        cat "$PROC_FILE"
+    else
+        echo "No mappings found or module not loaded"
+        return 1
+    fi
+}
+
+status_info() {
+    echo "Slick NAT Module Status:"
+    echo "======================="
+    
+    if is_container; then
+        echo "Environment: Container detected"
+        echo "Network namespace: $(readlink /proc/self/ns/net 2>/dev/null || echo 'unknown')"
+        echo "Mapping scope: This container only (namespace-isolated)"
+    else
+        echo "Environment: Host system"
+        echo "Network namespace: Host namespace"
+        echo "Mapping scope: Host namespace only"
+    fi
+    
+    # Check autoload status
+    if [ -f "$MODULES_LOAD_CONFIG" ]; then
+        echo "Auto-load on boot: ENABLED"
+    else
+        echo "Auto-load on boot: DISABLED"
+    fi
+    
+    if [ -f "$PROC_FILE" ]; then
+        echo "Module interface: AVAILABLE"
+        echo "Proc file: $PROC_FILE"
+        
+        # Check permissions
+        if [ -r "$PROC_FILE" ]; then
+            echo "Read access: OK"
+        else
+            echo "Read access: DENIED"
+        fi
+        
+        if [ -w "$PROC_FILE" ]; then
+            echo "Write access: OK"
+        else
+            echo "Write access: DENIED"
+        fi
+        
+        echo ""
+        list_mappings
+    else
+        echo "Module interface: NOT AVAILABLE"
+        if is_container; then
+            echo "This may be normal in containers - check host system"
+        else
+            echo "Load with: sudo modprobe slick_nat"
+        fi
+    fi
+}
+
+autoload_enable() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Error: Root privileges required to enable autoload"
+        echo "Run with: sudo $0 autoload enable"
+        return 1
+    fi
+    
+    if [ -f "$MODULES_LOAD_CONFIG" ]; then
+        echo "Autoload is already enabled"
+        return 0
+    fi
+    
+    echo "$MODULE_NAME" > "$MODULES_LOAD_CONFIG"
+    if [ $? -eq 0 ]; then
+        echo "Autoload enabled - module will be loaded on boot"
+        echo "Configuration written to: $MODULES_LOAD_CONFIG"
+    else
+        echo "Error: Failed to enable autoload"
+        return 1
+    fi
+}
+
+autoload_disable() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Error: Root privileges required to disable autoload"
+        echo "Run with: sudo $0 autoload disable"
+        return 1
+    fi
+    
+    if [ ! -f "$MODULES_LOAD_CONFIG" ]; then
+        echo "Autoload is already disabled"
+        return 0
+    fi
+    
+    rm "$MODULES_LOAD_CONFIG"
+    if [ $? -eq 0 ]; then
+        echo "Autoload disabled - module will not be loaded on boot"
+        echo "Configuration removed from: $MODULES_LOAD_CONFIG"
+    else
+        echo "Error: Failed to disable autoload"
+        return 1
+    fi
+}
+
+autoload_status() {
+    echo "Autoload Status:"
+    echo "==============="
+    
+    if [ -f "$MODULES_LOAD_CONFIG" ]; then
+        echo "Status: ENABLED"
+        echo "Config file: $MODULES_LOAD_CONFIG"
+        echo "Contents:"
+        cat "$MODULES_LOAD_CONFIG"
+    else
+        echo "Status: DISABLED"
+        echo "Config file: $MODULES_LOAD_CONFIG (not found)"
+    fi
+}
+
+load_module() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Error: Root privileges required to load kernel module"
+        echo "Run with: sudo $0 load"
+        return 1
+    fi
+    
+    if is_container; then
+        echo "Error: Cannot load kernel modules from within a container"
+        echo "Kernel modules must be loaded on the host system"
+        echo "On the host, run: sudo modprobe slick_nat"
+        return 1
+    fi
+    
+    # Check if module is already loaded
+    if [ -f "$PROC_FILE" ]; then
+        echo "Module is already loaded"
+        return 0
+    fi
+    
+    echo "Loading slick_nat kernel module..."
+    if modprobe "$MODULE_NAME" 2>/dev/null; then
+        echo "Module loaded successfully"
+        # Verify it's working
+        if [ -f "$PROC_FILE" ]; then
+            echo "Module interface available at: $PROC_FILE"
+        else
+            echo "Warning: Module loaded but proc interface not available"
+        fi
+    else
+        echo "Error: Failed to load module"
+        echo "Check that the module is installed and compatible with your kernel"
+        return 1
+    fi
+}
+
+unload_module() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Error: Root privileges required to unload kernel module"
+        echo "Run with: sudo $0 unload"
+        return 1
+    fi
+    
+    if is_container; then
+        echo "Error: Cannot unload kernel modules from within a container"
+        echo "Kernel modules must be unloaded on the host system"
+        echo "On the host, run: sudo modprobe -r slick_nat"
+        return 1
+    fi
+    
+    # Check if module is loaded
+    if [ ! -f "$PROC_FILE" ]; then
+        echo "Module is not loaded"
+        return 0
+    fi
+    
+    # Check if there are active mappings
+    if [ -f "$PROC_FILE" ] && [ -s "$PROC_FILE" ]; then
+        echo "Warning: Active NAT mappings exist:"
+        cat "$PROC_FILE"
+        echo ""
+        read -p "Unloading will remove all mappings. Continue? (y/N): " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Operation cancelled"
+            return 1
+        fi
+    fi
+    
+    echo "Unloading slick_nat kernel module..."
+    if modprobe -r "$MODULE_NAME" 2>/dev/null; then
+        echo "Module unloaded successfully"
+        # Verify it's gone
+        if [ ! -f "$PROC_FILE" ]; then
+            echo "Module interface removed"
+        else
+            echo "Warning: Module unloaded but proc interface still exists"
+        fi
+    else
+        echo "Error: Failed to unload module"
+        echo "Module may be in use or have dependencies"
+        return 1
+    fi
+}
+
+# Parse command line arguments
+case "$1" in
+    status)
+        status_info
+        ;;
+    load)
+        load_module
+        ;;
+    unload)
+        unload_module
+        ;;
+    clear-all)
+        clear_all
+        ;;
+    autoload)
+        case "$2" in
+            enable)
+                autoload_enable
+                ;;
+            disable)
+                autoload_disable
+                ;;
+            status)
+                autoload_status
+                ;;
+            *)
+                echo "Usage: $0 autoload {enable|disable|status}"
+                echo ""
+                echo "Commands:"
+                echo "  enable   - Enable automatic module loading on boot"
+                echo "  disable  - Disable automatic module loading on boot"
+                echo "  status   - Show autoload configuration status"
+                exit 1
+                ;;
+        esac
+        ;;
+    add-batch)
+        add_batch "$2"
+        ;;
+    del-batch)
+        del_batch "$2"
+        ;;
+    create-template)
+        create_batch_template "$2"
+        ;;
+    drop)
+        drop_mappings "$2"
+        ;;
+    help|--help|-h)
+        echo "Usage: $0 [status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop] or $0 <interface> {add|del|list}"
+        echo ""
+        echo "Commands:"
+        echo "  status                                    Show module status and mappings"
+        echo "  help                                      Show this help message"
+        echo "  load                                      Load the kernel module"
+        echo "  unload                                    Unload the kernel module"
+        echo "  clear-all                                 Clear all NAT mappings (non-interactive)"
+        echo "  autoload {enable|disable|status}         Manage automatic module loading"
+        echo "  add-batch <file>                          Add mappings from batch file"
+        echo "  del-batch <file>                          Delete mappings from batch file"
+        echo "  create-template <file>                    Create a template batch file"
+        echo "  drop {--all|<interface>}                  Drop all mappings or for interface"
+        echo "  <interface> add <internal> <external>     Add single NAT mapping"
+        echo "  <interface> del <internal>                Remove single NAT mapping"
+        echo "  <interface> list                          List mappings"
+        echo ""
+        echo "Batch file format:"
+        echo "  add <interface> <internal_prefix/len> <external_prefix/len>"
+        echo "  del <interface> <internal_prefix/len>"
+        echo "  drop <interface>    - Drop all mappings for interface"
+        echo "  drop --all         - Drop all mappings"
+        echo "  # Comments are ignored"
+        echo ""
+        echo "Examples:"
+        echo "  $0 status"
+        echo "  $0 load"
+        echo "  $0 unload"
+        echo "  $0 clear-all"
+        echo "  $0 drop --all"
+        echo "  $0 drop eth0"
+        echo "  $0 create-template /tmp/nat-config.txt"
+        echo "  $0 add-batch /tmp/nat-config.txt"
+        echo "  $0 del-batch /tmp/nat-delete.txt"
+        echo "  $0 autoload enable"
+        echo "  $0 eth0 add 2001:db8:internal::/64 2001:db8:external::/64"
+        echo "  $0 eth0 del 2001:db8:internal::/64"
+        echo "  $0 eth0 list"
+        ;;
+    *)
+        if [ -z "$1" ]; then
+            echo "Error: Missing arguments"
+            echo "Usage: $0 [status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop] or $0 <interface> {add|del|list}"
+            exit 1
+        fi
+        
+        case "$2" in
+            add)
+                add_mapping "$1" "$3" "$4"
+                ;;
+            del)
+                del_mapping "$1" "$3"
+                ;;
+            list)
+                list_mappings
+                ;;
+            *)
+                echo "Usage: $0 <interface> {add|del|list}"
+                echo "  <interface> add <internal_prefix/len> <external_prefix/len>"
+                echo "  <interface> del <internal_prefix/len>"
+                echo "  <interface> list"
+                echo ""
+                echo "Or use: $0 status|help|load|unload|clear-all|autoload|add-batch|del-batch|create-template|drop"
+                exit 1
+        esac
+        ;;
+esac
