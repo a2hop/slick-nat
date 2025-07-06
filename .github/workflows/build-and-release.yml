@@ -37,7 +37,7 @@ jobs:
         
         # Generate architecture-aware filename
         ARCH=$(dpkg --print-architecture)
-        DEB_FILENAME="slick-nat-dkms_${VERSION}_${ARCH}.deb"
+        DEB_FILENAME="slick-nat-dkms-${VERSION}_${ARCH}.deb"
         
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "deb_filename=$DEB_FILENAME" >> $GITHUB_OUTPUT
