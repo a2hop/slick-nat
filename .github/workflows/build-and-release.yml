@@ -69,7 +69,7 @@ jobs:
         
     - name: Get latest release
       id: latest_release
-      uses: actions/github-script@v6
+      uses: actions/github-script@v7
       continue-on-error: true
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -96,7 +96,7 @@ jobs:
     - name: Check if assets exist
       id: check_assets
       if: steps.latest_release.outputs.has_release == 'true'
-      uses: actions/github-script@v6
+      uses: actions/github-script@v7
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
@@ -125,7 +125,7 @@ jobs:
           
     - name: Delete existing assets if they exist
       if: steps.latest_release.outputs.has_release == 'true'
-      uses: actions/github-script@v6
+      uses: actions/github-script@v7
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
@@ -142,9 +142,7 @@ jobs:
           
     - name: Upload management script to release
       if: steps.latest_release.outputs.has_release == 'true'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: shogo82148/actions-upload-release-asset@v1
       with:
         upload_url: ${{ steps.latest_release.outputs.upload_url }}
         asset_path: ./src/slnat
@@ -153,9 +151,7 @@ jobs:
         
     - name: Upload Debian package to release
       if: steps.latest_release.outputs.has_release == 'true'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: shogo82148/actions-upload-release-asset@v1
       with:
         upload_url: ${{ steps.latest_release.outputs.upload_url }}
         asset_path: ./${{ steps.version.outputs.deb_filename }}
