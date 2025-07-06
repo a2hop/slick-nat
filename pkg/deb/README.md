@@ -28,8 +28,8 @@ chmod +x build-deb.sh
 ```
 
 This will create:
-- `build/slick-nat-dkms_0.0.3_amd64.deb` - The debian package (architecture-specific)
-- `build/slick-nat-dkms_0.0.3_amd64/` - The package contents (for inspection)
+- `build/slick-nat-dkms-0.0.3_amd64.deb` - The debian package (architecture-specific)
+- `build/slick-nat-dkms-0.0.3_amd64/` - The package contents (for inspection)
 
 ## Package Contents
 

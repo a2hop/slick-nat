@@ -76,7 +76,7 @@ cd pkg/deb
 ./build-deb.sh
 
 # Install package
-sudo dpkg -i build/slick-nat-dkms_0.0.3_amd64.deb
+sudo dpkg -i build/slick-nat-dkms-0.0.3_amd64.deb
 
 # Install missing dependencies if needed
 sudo apt-get install -f
@@ -354,7 +354,7 @@ cd pkg/deb
 ./build-deb.sh
 
 # Generated package
-ls build/slick-nat-dkms_0.0.3_amd64.deb
+ls build/slick-nat-dkms-0.0.3_amd64.deb
 ```
 
 ### DKMS Package
