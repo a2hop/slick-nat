@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG "CMakeFiles/slick-nat-daemon.dir/net-agent/slnat-daemon.cpp.o" -o slick-nat-daemon 

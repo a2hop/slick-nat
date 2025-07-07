@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG "CMakeFiles/slnatc.dir/net-client/slnatc.cpp.o" -o slnatc 
