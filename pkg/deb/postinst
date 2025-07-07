@@ -11,12 +11,31 @@ case "$1" in
     configure)
         echo "Configuring slick-nat-dkms..."
         
+        # Check if we have the right kernel headers
+        KERNEL_VERSION=$(uname -r)
+        if [ ! -d "/lib/modules/${KERNEL_VERSION}/build" ]; then
+            echo "Warning: Kernel headers not found for kernel ${KERNEL_VERSION}"
+            echo "Please install kernel headers: sudo apt install linux-headers-${KERNEL_VERSION}"
+        fi
+        
+        # Remove any existing DKMS entries first
+        if dkms status 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
+            echo "Removing existing DKMS entries..."
+            dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
+        fi
+        
         # Add to DKMS
         echo "Adding module to DKMS..."
-        dkms add -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" || true
+        if dkms add -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
+            echo "Module added to DKMS successfully"
+        else
+            echo "Error: Failed to add module to DKMS"
+            echo "Check that /usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION} exists and contains valid source"
+            exit 1
+        fi
         
         # Build the module
-        echo "Building module for current kernel..."
+        echo "Building module for kernel ${KERNEL_VERSION}..."
         if dkms build -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
             echo "Module built successfully"
             
@@ -28,30 +47,49 @@ case "$1" in
                 # Create modules-load.d configuration for autoloading
                 echo "Setting up automatic module loading..."
                 echo "${MODULE_NAME}" > "${MODULES_LOAD_CONFIG}"
+                
+                # Trigger depmod to update module dependencies
+                echo "Updating module dependencies..."
+                depmod -a
+                
                 echo "Module will be loaded automatically on boot"
             else
-                echo "Warning: Module installation failed"
-                echo "You may need to install kernel headers:"
-                echo "  sudo apt install linux-headers-\$(uname -r)"
+                echo "Error: Module installation failed"
+                echo "DKMS build succeeded but installation failed"
+                echo "Check dkms status: dkms status"
+                exit 1
             fi
         else
-            echo "Warning: Module build failed"
+            echo "Error: Module build failed"
             echo "Please check that you have:"
-            echo "  1. Kernel headers installed: sudo apt install linux-headers-\$(uname -r)"
-            echo "  2. Build tools installed: sudo apt install build-essential"
-            echo "  3. DKMS installed: sudo apt install dkms"
+            echo "  1. Kernel headers: sudo apt install linux-headers-${KERNEL_VERSION}"
+            echo "  2. Build tools: sudo apt install build-essential"
+            echo "  3. DKMS: sudo apt install dkms"
+            echo ""
+            echo "Check build logs with: dkms status"
+            exit 1
         fi
         
         # Load the module if build was successful
         if dkms status | grep -q "${PACKAGE_NAME}.*installed"; then
             echo "Loading module..."
-            modprobe "${MODULE_NAME}" || true
-            
-            # Check if module loaded
-            if lsmod | grep -q "${MODULE_NAME}"; then
+            if modprobe "${MODULE_NAME}"; then
                 echo "Module loaded successfully"
                 
-                # Setup configuration
+                # Check if module actually loaded
+                if lsmod | grep -q "${MODULE_NAME}"; then
+                    echo "Module is active and running"
+                else
+                    echo "Warning: Module loaded but not visible in lsmod"
+                fi
+            else
+                echo "Warning: Module installed but failed to load"
+                echo "This might be due to missing dependencies or kernel incompatibility"
+                echo "Try loading manually: modprobe ${MODULE_NAME}"
+            fi
+            
+            # Setup configuration only if module loads successfully
+            if lsmod | grep -q "${MODULE_NAME}"; then
                 echo "Setting up configuration..."
                 
                 # Create slnat.conf from template if it doesn't exist
@@ -72,19 +110,25 @@ case "$1" in
                 fi
                 
                 echo ""
+                echo "Installation completed successfully!"
+                echo ""
                 echo "Usage:"
                 echo "  Configure NAT: slnat <interface> add <internal_prefix> <external_prefix>"
                 echo "  List mappings: slnat <interface> list"
                 echo "  Check status: slnat status"
-                echo "  Manage autoload: slnat autoload {enable|disable|status}"
+                echo "  Load routes: slnat load"
                 echo ""
                 echo "Configuration:"
                 echo "  Edit /etc/slnat/slnat.conf to configure automatic route loading"
-                echo "  Run /etc/slnat/load-routes.sh to load routes manually"
                 echo "  Use 'systemctl start slnat' to load routes via systemd"
             else
-                echo "Module built but failed to load"
+                echo "Module installation completed but module failed to load"
+                echo "Check kernel logs: dmesg | tail -20"
+                echo "Try manual loading: modprobe ${MODULE_NAME}"
             fi
+        else
+            echo "Error: Module build completed but DKMS reports it's not installed"
+            echo "Check DKMS status: dkms status"
         fi
         ;;
         

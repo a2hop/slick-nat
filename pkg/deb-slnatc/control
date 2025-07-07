@@ -1,0 +1,13 @@
+Package: slick-nat-client
+Version: 1.0.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libc6 (>= 2.17), libstdc++6 (>= 5.4), libnlohmann-json3-dev
+Maintainer: SlickNat Team <team@slicknat.org>
+Description: SlickNat IPv6 NAT client utility
+ Command-line client for querying SlickNat daemon about IPv6 NAT mappings.
+ Provides tools to resolve internal/external IP mappings and query global
+ unicast addresses for local IPv6 addresses.
+ .
+ This package contains the slnatc command-line utility.

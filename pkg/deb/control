@@ -3,7 +3,7 @@ Version: 0.0.3
 Section: kernel
 Priority: optional
 Architecture: all
-Depends: dkms (>= 2.2), linux-headers-generic | linux-headers-amd64 | linux-headers
+Depends: dkms (>= 2.2), linux-headers-generic | linux-headers-amd64 | linux-headers | linux-headers-$(shell uname -r)
 Recommends: build-essential, linux-libc-dev
 Suggests: iproute2, iputils-ping, slick-nat-ns
 Installed-Size: 1024
@@ -20,9 +20,13 @@ Description: Slick NAT - Bidirectional IPv6 NAT kernel module
   * Neighbor Discovery Protocol proxy
   * ICMP error handling with embedded packet translation
   * Interface-specific mappings
+  * Automatic kernel module rebuilding via DKMS
  .
  This package uses DKMS to automatically build the kernel module for
  your system and rebuild it when kernel updates are installed.
+ .
+ The module will be automatically loaded on boot and can be managed
+ using the slnat command-line tool.
  .
  For container environments, also install slick-nat-ns package.
 Homepage: https://github.com/a2hop/slick-nat

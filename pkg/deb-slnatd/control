@@ -1,0 +1,12 @@
+Package: slick-nat-daemon
+Version: 1.0.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libc6 (>= 2.17), libstdc++6 (>= 5.4), libnlohmann-json3-dev, systemd
+Maintainer: SlickNat Team <team@slicknat.org>
+Description: SlickNat IPv6 NAT daemon
+ Daemon service that provides IPv6 NAT mapping information by reading
+ kernel SlickNat module data and serving it over a JSON API.
+ .
+ This package contains the slick-nat-daemon service and systemd integration.

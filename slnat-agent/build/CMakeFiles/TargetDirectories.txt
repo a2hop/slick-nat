@@ -1,0 +1,14 @@
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/slick-nat-daemon.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/slnatc.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/edit_cache.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/rebuild_cache.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/list_install_components.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/install.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/install/local.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/CMakeFiles/install/strip.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/_deps/nlohmann_json-build/CMakeFiles/edit_cache.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/_deps/nlohmann_json-build/CMakeFiles/rebuild_cache.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/_deps/nlohmann_json-build/CMakeFiles/list_install_components.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/_deps/nlohmann_json-build/CMakeFiles/install.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/_deps/nlohmann_json-build/CMakeFiles/install/local.dir
+/home/lxk/Desktop/slim-nat/slick-nat/slnat-agent/build/_deps/nlohmann_json-build/CMakeFiles/install/strip.dir

@@ -29,19 +29,32 @@ case "$1" in
         # Unload the module if loaded
         if lsmod | grep -q "${MODULE_NAME}"; then
             echo "Unloading module..."
-            modprobe -r "${MODULE_NAME}" || true
+            if ! modprobe -r "${MODULE_NAME}"; then
+                echo "Warning: Failed to unload module, it may be in use"
+                echo "Try: lsof | grep ${MODULE_NAME} or fuser -v /dev/${MODULE_NAME}"
+            fi
         fi
         
         # Remove from DKMS only on remove, not upgrade
         if [ "$1" = "remove" ]; then
             if dkms status 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
                 echo "Removing module from DKMS..."
+                # Remove from all kernels
                 dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
             fi
+        elif [ "$1" = "upgrade" ]; then
+            echo "Upgrade detected - preserving DKMS configuration"
+            echo "Module will be rebuilt for new package version"
         fi
         ;;
         
     failed-upgrade)
+        echo "Failed upgrade detected - attempting cleanup..."
+        # Try to remove any broken DKMS entries
+        if dkms status 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
+            echo "Cleaning up potentially broken DKMS entries..."
+            dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
+        fi
         ;;
         
     *)
