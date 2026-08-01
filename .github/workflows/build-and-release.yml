@@ -3,6 +3,8 @@ name: Build and Release Slick NAT
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -29,12 +31,27 @@ jobs:
     - name: Extract version
       id: version
       run: |
-        # Extract version from module source
+        # MODULE_VERSION() in the module source is the single source of truth;
+        # the packaging scripts derive from the same line.
         VERSION=$(grep -E '^MODULE_VERSION\(' src/slick-nat.c | sed 's/.*"\(.*\)".*/\1/')
         if [ -z "$VERSION" ]; then
-          VERSION="0.0.3"  # Fallback version
+          echo "::error::Could not read MODULE_VERSION() from src/slick-nat.c"
+          exit 1
         fi
-        
+
+        # When building a tag, the tag and the module version must agree.
+        # Without this guard a "v0.0.4" release happily ships 0.0.3 artifacts,
+        # because the build never looks at the tag at all.
+        if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$TAG_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match MODULE_VERSION(\"${VERSION}\") in src/slick-nat.c."
+            echo "::error::Bump MODULE_VERSION to ${TAG_VERSION} and re-tag, or tag v${VERSION}."
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches module version ${VERSION}"
+        fi
+
         # Generate architecture-aware filename
         ARCH=$(dpkg --print-architecture)
         DEB_FILENAME="slick-nat-dkms_${VERSION}_${ARCH}.deb"

@@ -26,7 +26,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Lukasz Xu-Kafarski");
 MODULE_DESCRIPTION("Slick NAT - Bidirectional IPv6 NAT Kernel Module");
-MODULE_VERSION("0.0.3");
+MODULE_VERSION("0.0.4");
 
 #define PROC_FILENAME "slick_nat_mappings"
 #define PROC_BATCH_FILENAME "slick_nat_batch"
