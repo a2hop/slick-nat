@@ -3,8 +3,20 @@
 set -e
 
 PACKAGE_NAME="slick-nat"
-PACKAGE_VERSION="0.0.3"
 MODULE_NAME="slick_nat"
+
+# Derive the version from MODULE_VERSION() in the module source rather than
+# keeping a second literal here, which would silently install under the wrong
+# /usr/src/slick-nat-<version> directory once the module was bumped.
+PACKAGE_VERSION="${PACKAGE_VERSION:-$(sed -n 's/^MODULE_VERSION("\([^"]*\)").*/\1/p' \
+                  "$(dirname "$0")/../src/slick-nat.c" | head -1)}"
+
+if [ -z "${PACKAGE_VERSION}" ]; then
+    echo "Error: could not determine version from ../src/slick-nat.c" >&2
+    exit 1
+fi
+
+echo "Version: ${PACKAGE_VERSION}"
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
@@ -39,8 +51,10 @@ mkdir -p "${SRCDIR}"
 # Copy source files from the src directory
 cp -r ../src/* "${SRCDIR}/"
 
-# Copy DKMS configuration files
-cp dkms.conf "${SRCDIR}/"
+# Copy DKMS configuration files. dkms.conf's PACKAGE_VERSION must match the
+# /usr/src/slick-nat-<version> directory name, so stamp it rather than copying
+# its own hardcoded literal.
+sed "s|^PACKAGE_VERSION=.*|PACKAGE_VERSION=\"${PACKAGE_VERSION}\"|" dkms.conf > "${SRCDIR}/dkms.conf"
 cp Makefile "${SRCDIR}/"
 
 # Remove any existing DKMS installation

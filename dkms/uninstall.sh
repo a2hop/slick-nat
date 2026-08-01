@@ -3,7 +3,6 @@
 set -e
 
 PACKAGE_NAME="slick-nat"
-PACKAGE_VERSION="0.0.3"
 MODULE_NAME="slick_nat"
 
 # Check if running as root
@@ -20,18 +19,24 @@ if lsmod | grep -q "${MODULE_NAME}"; then
     modprobe -r "${MODULE_NAME}" || true
 fi
 
-# Remove from DKMS
-if dkms status | grep -q "${PACKAGE_NAME}"; then
-    echo "Removing from DKMS..."
-    dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
-fi
+# Remove every registered version from DKMS.
+# This used to target one hardcoded version, so after a version bump the
+# uninstaller silently left the older DKMS entry and its source tree behind.
+INSTALLED_VERSIONS="$(dkms status -m "${PACKAGE_NAME}" 2>/dev/null \
+                      | sed -n "s|^${PACKAGE_NAME}[/,] *\([^,:]*\).*|\1|p" \
+                      | sort -u)"
 
-# Remove source directory
-SRCDIR="/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}"
-if [[ -d "${SRCDIR}" ]]; then
-    echo "Removing source directory..."
+for PACKAGE_VERSION in ${INSTALLED_VERSIONS}; do
+    echo "Removing ${PACKAGE_NAME}/${PACKAGE_VERSION} from DKMS..."
+    dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
+done
+
+# Remove any leftover source directories
+for SRCDIR in /usr/src/"${PACKAGE_NAME}"-*; do
+    [[ -d "${SRCDIR}" ]] || continue
+    echo "Removing source directory ${SRCDIR}..."
     rm -rf "${SRCDIR}"
-fi
+done
 
 # Remove management script
 if [[ -f "/usr/local/bin/slnat" ]]; then

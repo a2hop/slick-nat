@@ -4,15 +4,32 @@ set -e
 
 # Package configuration
 PACKAGE_NAME="slick-nat-dkms"
-PACKAGE_VERSION="0.0.3"
 ARCHITECTURE="$(dpkg --print-architecture)"
 MAINTAINER="Slick NAT Project <lucas@xtec.one>"
 DESCRIPTION="Slick NAT - Bidirectional IPv6 NAT kernel module with DKMS support"
 
 # Build configuration
 BUILD_DIR="$(pwd)/build"
-PACKAGE_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCHITECTURE}"
 SOURCE_DIR="$(realpath ../../)"
+
+# Single source of truth for the version: MODULE_VERSION() in the module
+# source. This is the same value the release workflow greps out to name the
+# artifact, so the two can no longer disagree. Previously this was a separate
+# hardcoded literal, which meant bumping either one on its own produced a
+# filename mismatch and a failed build.
+# Override for a one-off build with: PACKAGE_VERSION=1.2.3 ./build-deb.sh
+if [ -z "${PACKAGE_VERSION:-}" ]; then
+    PACKAGE_VERSION="$(sed -n 's/^MODULE_VERSION("\([^"]*\)").*/\1/p' \
+                       "${SOURCE_DIR}/src/slick-nat.c" | head -1)"
+fi
+
+if [ -z "${PACKAGE_VERSION}" ]; then
+    echo "Error: could not determine version from ${SOURCE_DIR}/src/slick-nat.c" >&2
+    echo "Expected a line of the form: MODULE_VERSION(\"x.y.z\");" >&2
+    exit 1
+fi
+
+PACKAGE_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCHITECTURE}"
 
 echo "Building ${PACKAGE_NAME} version ${PACKAGE_VERSION} for ${ARCHITECTURE}"
 echo "Source directory: ${SOURCE_DIR}"
