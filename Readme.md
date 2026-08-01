@@ -13,7 +13,7 @@ A high-performance IPv6 NAT kernel module that provides bidirectional address tr
 - **ICMP Error Handling**: Proper translation of embedded packets in ICMP error messages
 - **TTL/Hop Limit Management**: Generates appropriate time exceeded messages for traceroute support
 - **Interface-Specific Mappings**: Different NAT rules per network interface
-- **High Performance**: Radix tree-based lookups for O(log n) mapping resolution
+- **High Performance**: Hash-table lookups with longest-prefix-match semantics
 
 ## Version
 
@@ -21,7 +21,7 @@ Current version: **0.0.3** (semver compatible)
 
 ## Architecture
 
-The module operates at the netfilter PRE_ROUTING and POST_ROUTING hooks, intercepting IPv6 packets and performing address translation based on configured prefix mappings. It maintains separate mapping tables for each network namespace with optimized radix tree lookups.
+The module operates at the netfilter PRE_ROUTING hook, intercepting IPv6 packets and performing address translation based on configured prefix mappings. It maintains separate mapping tables for each network namespace, indexed by hash tables keyed on the masked prefix.
 
 ### Key Components
 
@@ -29,7 +29,7 @@ The module operates at the netfilter PRE_ROUTING and POST_ROUTING hooks, interce
 - **NDP Proxy**: Handles neighbor solicitation/advertisement for external prefixes
 - **ICMP Processor**: Translates embedded packets in ICMP error messages
 - **Mapping Manager**: Dynamic configuration through proc filesystem interface
-- **Radix Tree Index**: Fast O(log n) prefix lookups for high performance
+- **Prefix Index**: Hash tables keyed on the masked prefix, walked longest-prefix-first
 
 ## Installation
 
@@ -251,28 +251,26 @@ Container2: 2001:db8:cont2::/64 → 2001:db8:pub2::/64
 ## Performance Characteristics
 
 ### Lookup Performance
-- **Radix Tree Implementation**: O(log n) lookup time
-- **Tail Segment Optimization**: Fast path for /112, /96, /80, /64 prefixes
+- **Hash Table Implementation**: O(1) per prefix length actually in use
+- **Longest Prefix Match**: The most specific mapping always wins
 - **Scalability**: Handles thousands of mappings efficiently
 
 ### Memory Usage
 - **Base Module**: ~50KB kernel memory
-- **Per Mapping**: ~200 bytes (including radix tree overhead)
+- **Per Mapping**: ~120 bytes (including hash table overhead)
 - **Per Namespace**: ~1KB for management structures
 
 ### Throughput
 - **Zero-copy Translation**: No packet data copying
 - **Interrupt Context Safe**: Processes packets in softirq context
-- **SMP Scalable**: Lock-free radix tree reads with RCU protection
+- **SMP Scalable**: Concurrent packet processing across multiple CPUs
 
 ## Performance Considerations
 
 - **Batch Operations**: Apply multiple rules in a single transaction for improved performance
-- **Optimized Lookups**: Radix tree implementation provides O(log n) performance
-- **Tail Segment Priority**: Optimized for /112, /96, /80 prefixes commonly used in modern deployments
+- **Optimized Lookups**: Hash-table index costs one probe per prefix length in use
+- **Longest Prefix Match**: Overlapping prefixes resolve to the most specific mapping
 - **Memory Efficiency**: Minimal per-mapping overhead with shared tree structures
-- **Lock-free Reads**: RCU-protected mapping tables for high throughput
-- **NUMA-aware**: Proper memory allocation for multi-socket systems
 - **Interrupt Context Safe**: Can process packets in softirq context
 - **SMP Scalable**: Concurrent packet processing across multiple CPUs
 
@@ -318,8 +316,8 @@ Container2: 2001:db8:cont2::/64 → 2001:db8:pub2::/64
    # Check mapping count
    cat /proc/net/slick_nat_mappings | wc -l
    
-   # Monitor radix tree efficiency
-   dmesg | grep -i "radix\|slick"
+   # Monitor module activity
+   dmesg | grep -i slick
    ```
 
 5. **NDP not responding**
@@ -381,19 +379,26 @@ tar -czf slick-nat-0.0.3.tar.gz \
 
 ## Limitations
 
-- Maximum 10,000 concurrent mappings per namespace (configurable)
-- Supports only TCP, UDP, and ICMPv6 protocols
+- Maximum 10,000 mappings per namespace (`SLICK_NAT_MAX_MAPPINGS`)
+- Transport checksums are corrected for TCP, UDP, UDP-Lite and ICMPv6; other
+  protocols are translated but carry no checksum that needs fixing up
+- For fragmented datagrams the checksum is corrected in the first fragment,
+  where the transport header lives; trailing fragments are address-translated only
 - No IPv4 support (IPv6 only)
-- Link-local addresses are not translated
+- Packets with link-local source *and* destination are not translated
+- Only traffic arriving on an interface is translated (PRE_ROUTING); traffic
+  originated by the NAT host itself is not
 - Container mappings are per-namespace (isolated between containers)
 
 ## Security Notes
 
-- Root privileges required for configuration
+- Root privileges required for configuration: the proc interfaces are created
+  mode 0644, so they are world-readable but writable only by root
 - Mappings are stored in kernel memory (not persistent)
-- No authentication mechanism for proc interface
-- Consider iptables rules for access control
-- Container access requires proper LXD/Docker configuration
+- No authentication mechanism beyond the proc file permissions
+- Consider ip6tables rules for access control
+- Container access requires proper LXD/Docker configuration, and the container
+  must write the proc file as root
 
 ## Version History
 

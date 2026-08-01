@@ -19,26 +19,29 @@ struct slick_nat_net {
     spinlock_t mapping_lock;          // Protection for mapping operations
     struct proc_dir_entry *proc_entry; // Proc filesystem entry
     struct proc_dir_entry *proc_batch_entry; // Batch processing interface
-    struct radix_tree_root internal_tree;  // For internal prefix lookups
-    struct radix_tree_root external_tree;  // For external prefix lookups
+    struct hlist_head internal_hash[SLICK_NAT_HASH_SIZE]; // Internal prefix index
+    struct hlist_head external_hash[SLICK_NAT_HASH_SIZE]; // External prefix index
+    u16 prefix_len_use[129];          // Mappings per prefix length
+    unsigned int mapping_count;       // Total mappings in this namespace
 };
 
 struct nat_mapping {
     struct list_head list;            // List linkage
+    struct hlist_node internal_node;  // Internal hash bucket linkage
+    struct hlist_node external_node;  // External hash bucket linkage
     char interface[IFNAMSIZ];         // Interface name
-    struct in6_addr internal_prefix;  // Internal network prefix
-    struct in6_addr external_prefix;  // External network prefix
+    struct in6_addr internal_prefix;  // Internal network prefix (masked)
+    struct in6_addr external_prefix;  // External network prefix (masked)
     int prefix_len;                   // Prefix length (must match for both)
-    unsigned long internal_key;       // Radix tree key for internal prefix
-    unsigned long external_key;       // Radix tree key for external prefix
 };
 
-// Batch operation structure
-struct batch_operation {
-    char operation[8];               // "add", "del", or "drop"
-    char interface[IFNAMSIZ];        // Interface name
-    char internal_prefix[64];        // Internal prefix string
-    char external_prefix[64];        // External prefix string (may be empty)
+// Snapshot handed to the packet path so it never dereferences a mapping
+// after dropping mapping_lock.
+struct nat_xlate {
+    struct in6_addr from_prefix;
+    struct in6_addr to_prefix;
+    int prefix_len;
+    bool valid;
 };
 ```
 
@@ -46,15 +49,17 @@ struct batch_operation {
 
 ### Netfilter Hook Strategy
 
-**PRE_ROUTING Hook (NF_IP6_PRI_NAT_DST)**
-- Processes ingress packets from external interfaces
-- Translates destination addresses from external to internal
+**PRE_ROUTING Hook (NF_IP6_PRI_NAT_DST)** - the only hook registered
+- On external interfaces: translates destination (and, where a mapping
+  exists, source) from the external prefix into the internal one
+- On internal interfaces: translates the source into the external prefix;
+  the destination is translated only when it too lives in an internal prefix
 - Handles NDP solicitations for external prefixes
 - Manages hop limit expiration
 
-**POST_ROUTING Hook (NF_IP6_PRI_NAT_SRC)**
-- Cleans up packet marks
-- Ensures translated packets don't get re-processed
+There is deliberately **no POST_ROUTING hook**: the module no longer stamps
+`skb->mark`, so there is nothing to clean up. Marking translated packets
+would clobber any fwmark the administrator relies on for policy routing.
 
 ### Address Translation Algorithm
 
@@ -85,32 +90,34 @@ static bool compare_prefix_with_len(const struct in6_addr *addr,
 }
 ```
 
-### Radix Tree Performance Optimization
+### Prefix Index
 
-**Problem**: Linear search through mapping list was O(n)
-**Solution**: Implemented radix tree for O(log n) lookups
+**Problem**: Linear search through the mapping list is O(n)
+**Solution**: Two hash tables keyed on the *masked* prefix plus its length
 
 ```c
-// Radix tree key generation from IPv6 prefix
-static unsigned long generate_radix_key(const struct in6_addr *prefix, int prefix_len) {
-    unsigned long key = 0;
-    int i;
-    
-    // Use first 64 bits + prefix length as key
-    for (i = 0; i < 8 && i < 16; i++) {
-        key = (key << 8) | prefix->s6_addr[i];
-    }
-    key = (key << 8) | (prefix_len & 0xFF);
-    
-    return key;
+// The masking is what makes the index work: hashing a packet address at
+// length N lands in the same bucket as the stored prefix of length N that
+// covers it.  The previous radix-tree key hashed unmasked address bytes, so
+// a packet address never matched its own prefix except at exactly /64.
+static u32 prefix_hash(const struct in6_addr *addr, int prefix_len) {
+    struct in6_addr masked;
+
+    ipv6_addr_prefix(&masked, addr, prefix_len);
+    return jhash2((const u32 *)masked.s6_addr32, 4, prefix_len) &
+           (SLICK_NAT_HASH_SIZE - 1);
 }
 ```
 
 **Key Design Decisions**:
-- Separate radix trees for internal and external prefixes
-- Fast path for common prefix lengths (64, 48, 56, 32)
-- Fallback to full iteration for unusual prefix lengths
-- Key collision handling with XOR modification
+- Separate hash tables for internal and external prefixes
+- `prefix_len_use[]` records which prefix lengths exist, so a lookup probes
+  only the lengths actually configured
+- Lengths are walked from /128 down, giving true longest-prefix match
+- Collisions are handled by ordinary hash chaining plus an exact
+  `compare_prefix_with_len()` check, so no key fixups are needed
+- Prefixes are masked at parse time, so the index and the `del` path agree
+  even when the user leaves host bits set
 
 ### Batch Processing Implementation
 
@@ -152,26 +159,37 @@ static const struct proc_ops batch_proc_ops = {
 
 ## Critical Implementation Decisions
 
-#### 1. Packet Mark Usage
-- **Problem**: Preventing infinite loops in translation
-- **Solution**: Mark translated packets with `0xDEADBEEF`
-- **Alternative considered**: Per-CPU flags (rejected due to SMP complexity)
+#### 1. No Packet Marks
+- **Problem**: Earlier versions stamped `skb->mark = 0xDEADBEEF` on every
+  translated packet to prevent re-processing
+- **Why it was wrong**: it destroyed the administrator's fwmark, breaking
+  policy routing, tc filters and ip6tables mark matches
+- **Solution**: dropped entirely. A packet crosses PRE_ROUTING once, and
+  self-generated packets (NA replies via `dev_queue_xmit()`, ICMP errors via
+  `icmpv6_send()`) never re-enter PRE_ROUTING, so no marker is needed
 
 #### 2. Checksum Handling
 - **Problem**: IPv6 pseudo-header checksum updates
-- **Solution**: Use `inet_proto_csum_replace4()` for 32-bit word updates
-- **Hack**: Process each address as 4 x 32-bit words for efficiency
+- **Solution**: `inet_proto_csum_replace4()` per 32-bit word for outer address
+  changes (TCP, UDP, UDP-Lite, ICMPv6)
+- **Extension headers**: the transport offset comes from
+  `ipv6_skip_exthdr()`, not from assuming `nexthdr` is the transport protocol
+- **Fragments**: only the first fragment carries the checksum field, so
+  trailing fragments are address-translated without a checksum fixup
+- **ICMPv6 errors**: after the embedded header is rewritten the whole ICMPv6
+  checksum is recomputed with `csum_ipv6_magic()`, mirroring
+  `nf_nat_icmpv6_reply_translation()`, rather than patched incrementally
 
 #### 3. Memory Management
 - **Problem**: Kernel memory allocation in interrupt context
 - **Solution**: Use `GFP_ATOMIC` for skb allocation
 - **Workaround**: Pre-allocate commonly used structures (future enhancement)
 
-#### 4. Radix Tree Implementation
+#### 4. Hash Index Implementation
 - **Problem**: O(n) linear search performance bottleneck
-- **Solution**: Dual radix trees for internal/external prefix lookups
-- **Tradeoff**: Memory overhead vs. lookup performance
-- **Optimization**: Common prefix length fast path
+- **Solution**: Dual hash tables for internal/external prefix lookups
+- **Tradeoff**: Fixed per-namespace table cost vs. lookup performance
+- **Optimization**: `prefix_len_use[]` skips prefix lengths that are unused
 
 #### 5. Batch Processing Interface
 - **Problem**: Individual rule application has high syscall and lock overhead
@@ -187,23 +205,31 @@ static const struct proc_ops batch_proc_ops = {
 **Solution**: Manual packet construction and injection
 
 ```c
-// Hack: Direct dev_queue_xmit() instead of netif_receive_skb()
-// Reason: Avoid recursive netfilter processing
-reply_skb->mark = PACKET_MARK;
+// Direct dev_queue_xmit() instead of netif_receive_skb():
+// egress bypasses PRE_ROUTING, so the reply cannot loop back into us.
 if (dev_queue_xmit(reply_skb) < 0) {
     pr_err("Slick NAT: Failed to send NA\n");
 }
 ```
+
+The reply is a hand-built Ethernet frame, so `send_neighbor_advertisement()`
+bails out unless the device is `ARPHRD_ETHER` with a 6-byte address and is up.
+A solicitation whose source is `::` is a DAD probe: the advertisement then goes
+unsolicited to `ff02::1` (MAC `33:33:00:00:00:01`) instead of being unicast
+back to the unspecified address.
 
 ### 2. Interface Detection Logic
 
 **Problem**: Different hook points provide different interface information
 **Solution**: Conditional interface selection based on hook state
 
+Only PRE_ROUTING is registered, so `state->in` is always set and
+`state->out` is always NULL:
+
 ```c
-// Hack: Handle both directions with single hook
-ifname = (state->in) ? state->in->name : 
-         (state->out) ? state->out->name : NULL;
+if (!skb || !state->in)
+    return NF_ACCEPT;
+ifname = state->in->name;
 ```
 
 ### 3. ICMP Error Message Handling
@@ -218,18 +244,25 @@ ifname = (state->in) ? state->in->name :
 **Problem**: Need to generate Time Exceeded messages for traceroute
 **Solution**: Check hop limit before translation and generate ICMP errors
 
-**Hack**: Use actual interface IPv6 address as source for authenticity
+**Implementation**: `icmpv6_send()` is called *before* translation, so the
+embedded packet shows the external address the sender used. It also gives us
+the kernel's source-address selection, routing and ICMP rate limiting for
+free - the earlier hand-built frame had none of those, and returned a pointer
+to an `inet6_ifaddr` address after `rcu_read_unlock()`.
 
-### 5. Radix Tree Key Collisions
+### 5. Hash Collisions
 
-**Problem**: Different IPv6 prefixes may generate same radix tree key
-**Solution**: XOR-based key modification for collision resolution
+**Problem**: Different IPv6 prefixes may hash to the same bucket
+**Solution**: Ordinary chaining. Every candidate is confirmed with an exact
+prefix comparison, so a collision costs one extra comparison and never a
+wrong answer.
 
 ```c
-// Handle key collisions gracefully
-if (radix_tree_insert(&tree, key, mapping) < 0) {
-    key = key ^ 0x1;  // Simple XOR modification
-    radix_tree_insert(&tree, key, mapping);
+hlist_for_each_entry(mapping, &sn_net->internal_hash[prefix_hash(addr, prefix_len)],
+                     internal_node) {
+    if (mapping->prefix_len == prefix_len &&
+        compare_prefix_with_len(addr, &mapping->internal_prefix, prefix_len))
+        return mapping;
 }
 ```
 
@@ -237,7 +270,10 @@ if (radix_tree_insert(&tree, key, mapping) < 0) {
 
 ### 1. Race Conditions
 - **Issue**: Mapping list modifications vs. packet processing
-- **Mitigation**: spinlock_irqsave() for atomic operations
+- **Mitigation**: `spin_lock_irqsave()` for all mapping access. The packet
+  path copies what it needs into a `struct nat_xlate` while holding the lock;
+  it must never keep a `struct nat_mapping *` past the unlock, or a concurrent
+  `del`/`drop` will free it underneath us
 - **Future**: Consider RCU for better performance
 
 ### 2. Memory Leaks
@@ -246,34 +282,31 @@ if (radix_tree_insert(&tree, key, mapping) < 0) {
 - **Test**: Run with KASAN enabled
 
 ### 3. Performance Bottlenecks
-- **Issue**: Linear search through mapping list
-- **Future**: Hash table or radix tree for O(1) lookups
-- **Workaround**: Keep mapping count reasonable (< 100)
+- **Issue**: `is_external_interface()` still walks the whole mapping list on
+  every packet to decide which direction to translate
+- **Mitigation**: the hook returns early when the namespace has no mappings
+- **Future**: index interfaces by ifindex instead of scanning by name
 
-### 4. Radix Tree Memory Usage
-- **Issue**: Additional memory overhead per mapping
-- **Mitigation**: Acceptable tradeoff for performance gain
-- **Monitor**: Memory usage with large mapping counts
+### 4. Hash Table Memory Usage
+- **Issue**: Two 256-entry tables per network namespace
+- **Mitigation**: ~4 KB per namespace, independent of mapping count
+- **Monitor**: Memory usage with very large namespace counts
 
 ## Performance Improvements
 
-### Before Radix Tree Implementation
+### Before the Prefix Index
 - **Lookup Time**: O(n) linear search
 - **Memory Usage**: Lower (list only)
 - **Scalability**: Poor with >100 mappings
 
-### After Radix Tree Implementation
-- **Lookup Time**: O(log n) average case
-- **Memory Usage**: Higher (radix tree overhead)
-- **Scalability**: Good up to thousands of mappings
-
-### Benchmark Results
-```bash
-# Test with 1000 mappings
-# Before: ~100ms for 1000 lookups
-# After:  ~10ms for 1000 lookups
-# Improvement: 10x faster
-```
+### With the Hash Index
+- **Lookup Time**: one bucket probe per prefix length in use (typically 1-3)
+- **Memory Usage**: two fixed 256-entry tables per namespace
+- **Scalability**: Good up to the 10,000-mapping cap
+- **Correctness**: overlapping prefixes now resolve longest-first; the
+  previous radix key only ever matched at exactly /64, so every other prefix
+  length silently fell back to a full list walk that returned the *first*
+  match rather than the most specific one
 
 ## Testing Strategies
 
@@ -364,13 +397,14 @@ echo 1 > /sys/kernel/slab/kmalloc-*/validate
 cat /proc/slabinfo | grep -E "(kmalloc|skbuff)"
 ```
 
-### 4. Radix Tree Debugging
+### 4. Prefix Index Debugging
 ```bash
-# Check radix tree structure
-cat /proc/slabinfo | grep radix_tree_node
+# Confirm which prefix lengths are configured
+awk '/->/ {split($2,a,"/"); print a[2]}' /proc/net/slick_nat_mappings | sort -n | uniq -c
 
-# Monitor tree depth and efficiency
-echo 'radix_tree_lookup' > /sys/kernel/debug/tracing/set_ftrace_filter
+# Trace lookups
+echo '__find_mapping_by_internal' > /sys/kernel/debug/tracing/set_ftrace_filter
+echo '__find_mapping_by_external' >> /sys/kernel/debug/tracing/set_ftrace_filter
 ```
 
 ## Development Guidelines
@@ -390,16 +424,16 @@ echo 'radix_tree_lookup' > /sys/kernel/debug/tracing/set_ftrace_filter
 - Use proper cleanup paths (goto labels)
 - Log errors with appropriate severity levels
 
-### 4. Radix Tree Guidelines
-- Always handle key collisions gracefully
-- Use consistent key generation across operations
-- Test with overlapping prefixes
-- Monitor memory usage with large datasets
+### 4. Prefix Index Guidelines
+- Always hash the *masked* prefix, never raw address bytes
+- Keep `prefix_len_use[]` in step with insertions and removals
+- Test with overlapping prefixes of differing lengths
+- Never let a `struct nat_mapping *` escape `mapping_lock`
 
 ## Future Enhancements
 
 ### 1. Performance Optimizations
-- ~~Replace linear search with hash table~~ ✓ **DONE: Radix tree implementation**
+- ~~Replace linear search with hash table~~ ✓ **DONE: masked-prefix hash index**
 - ~~Add batch processing interface~~ ✓ **DONE: Added in v0.0.3**
 - Implement per-CPU mapping caches
 - Add bulk packet processing
@@ -433,8 +467,10 @@ echo 'radix_tree_lookup' > /sys/kernel/debug/tracing/set_ftrace_filter
 - No direct hardware access
 
 ### 3. DoS Prevention
-- Limit maximum number of mappings
-- Rate limiting for ICMP responses
+- Mapping count is capped at `SLICK_NAT_MAX_MAPPINGS` (10,000) per namespace
+- Generated ICMP errors go through `icmpv6_send()`, which honours
+  `net.ipv6.icmp.ratelimit`
+- Proc entries are mode 0644, so only root can change forwarding behaviour
 - Proper resource cleanup on errors
 
 ## Kernel Version Compatibility
@@ -454,11 +490,11 @@ echo 'radix_tree_lookup' > /sys/kernel/debug/tracing/set_ftrace_filter
 ### Makefile Structure
 ```makefile
 # Standard kernel module build
-obj-m += slick-nat.o
-slick-nat-objs := slick-nat.o ndp.o
+obj-m := slick_nat.o
+slick_nat-objs := slick-nat.o ndp.o
 
 # Kernel build directory detection
-KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
+KDIR ?= /lib/modules/$(KVERSION)/build
 ```
 
 ### Cross-Compilation
@@ -486,7 +522,7 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 ### Performance Testing
 - [ ] Benchmark lookup times with various mapping counts
 - [ ] Monitor memory usage growth
-- [ ] Test radix tree key collision handling
+- [ ] Test hash collision handling and longest-prefix resolution
 - [ ] Validate performance under high packet rates
 
 ## Contact Information

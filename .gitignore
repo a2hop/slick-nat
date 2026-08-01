@@ -1,2 +1,7 @@
 pkg/deb/build
 
+*.cmd
+*.o
+*.ko
+*.mod
+*.mod.c
