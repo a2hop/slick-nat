@@ -18,20 +18,18 @@ case "$1" in
             fi
         fi
         
-        # Clear existing mappings before unloading module
-        if lsmod | grep -q "${MODULE_NAME}"; then
-            echo "Clearing existing NAT mappings..."
-            if [ -x "/usr/local/bin/slnat" ]; then
-                /usr/local/bin/slnat clear-all || true
-            fi
-        fi
-        
+        # Note: mappings are deliberately NOT cleared here. The service's
+        # ExecStop already drops them, and unloading the module frees them
+        # anyway -- issuing a second "drop --all" only widens the window in
+        # which mappings are torn down underneath live forwarded traffic.
+
         # Unload the module if loaded
-        if lsmod | grep -q "${MODULE_NAME}"; then
+        if lsmod | grep -q "^${MODULE_NAME}[[:space:]]"; then
             echo "Unloading module..."
             if ! modprobe -r "${MODULE_NAME}"; then
                 echo "Warning: Failed to unload module, it may be in use"
-                echo "Try: lsof | grep ${MODULE_NAME} or fuser -v /dev/${MODULE_NAME}"
+                echo "The upgrade will continue, but the new module only becomes"
+                echo "active after a reboot."
             fi
         fi
         

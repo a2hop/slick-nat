@@ -7,23 +7,48 @@ PACKAGE_VERSION="0.0.3"
 MODULE_NAME="slick_nat"
 MODULES_LOAD_CONFIG="/etc/modules-load.d/slick-nat.conf"
 
+module_is_loaded() {
+    lsmod 2>/dev/null | grep -q "^${MODULE_NAME}[[:space:]]"
+}
+
+dkms_is_installed() {
+    dkms status -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" 2>/dev/null | grep -q "installed"
+}
+
 case "$1" in
     configure)
         echo "Configuring slick-nat-dkms..."
-        
-        # Check if we have the right kernel headers
+
         KERNEL_VERSION=$(uname -r)
+
+        # Never tear down a working installation when we have no way to build a
+        # replacement. Doing so used to leave the machine with no module at all
+        # (and no NAT) whenever the headers happened to be missing.
         if [ ! -d "/lib/modules/${KERNEL_VERSION}/build" ]; then
             echo "Warning: Kernel headers not found for kernel ${KERNEL_VERSION}"
-            echo "Please install kernel headers: sudo apt install linux-headers-${KERNEL_VERSION}"
+            echo "Install them with: apt install linux-headers-${KERNEL_VERSION}"
+
+            if dkms_is_installed; then
+                echo ""
+                echo "Error: refusing to rebuild without kernel headers, because a"
+                echo "working ${PACKAGE_NAME} module is already installed for this kernel."
+                echo "The existing module has been left untouched."
+                echo "Install the headers and re-run: dpkg-reconfigure slick-nat-dkms"
+                exit 1
+            fi
+
+            echo "Skipping build; DKMS autoinstall will build the module once"
+            echo "matching kernel headers are available."
+            echo "${MODULE_NAME}" > "${MODULES_LOAD_CONFIG}"
+            exit 0
         fi
-        
+
         # Remove any existing DKMS entries first
         if dkms status 2>/dev/null | grep -q "${PACKAGE_NAME}"; then
             echo "Removing existing DKMS entries..."
             dkms remove -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}" --all || true
         fi
-        
+
         # Add to DKMS
         echo "Adding module to DKMS..."
         if dkms add -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
@@ -33,33 +58,10 @@ case "$1" in
             echo "Check that /usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION} exists and contains valid source"
             exit 1
         fi
-        
+
         # Build the module
         echo "Building module for kernel ${KERNEL_VERSION}..."
-        if dkms build -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
-            echo "Module built successfully"
-            
-            # Install the module
-            echo "Installing module..."
-            if dkms install -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
-                echo "Module installed successfully"
-                
-                # Create modules-load.d configuration for autoloading
-                echo "Setting up automatic module loading..."
-                echo "${MODULE_NAME}" > "${MODULES_LOAD_CONFIG}"
-                
-                # Trigger depmod to update module dependencies
-                echo "Updating module dependencies..."
-                depmod -a
-                
-                echo "Module will be loaded automatically on boot"
-            else
-                echo "Error: Module installation failed"
-                echo "DKMS build succeeded but installation failed"
-                echo "Check dkms status: dkms status"
-                exit 1
-            fi
-        else
+        if ! dkms build -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
             echo "Error: Module build failed"
             echo "Please check that you have:"
             echo "  1. Kernel headers: sudo apt install linux-headers-${KERNEL_VERSION}"
@@ -69,72 +71,105 @@ case "$1" in
             echo "Check build logs with: dkms status"
             exit 1
         fi
-        
-        # Load the module if build was successful
-        if dkms status | grep -q "${PACKAGE_NAME}.*installed"; then
-            echo "Loading module..."
-            if modprobe "${MODULE_NAME}"; then
-                echo "Module loaded successfully"
-                
-                # Check if module actually loaded
-                if lsmod | grep -q "${MODULE_NAME}"; then
-                    echo "Module is active and running"
-                else
-                    echo "Warning: Module loaded but not visible in lsmod"
-                fi
-            else
-                echo "Warning: Module installed but failed to load"
-                echo "This might be due to missing dependencies or kernel incompatibility"
-                echo "Try loading manually: modprobe ${MODULE_NAME}"
+        echo "Module built successfully"
+
+        # Install the module
+        echo "Installing module..."
+        if ! dkms install -m "${PACKAGE_NAME}" -v "${PACKAGE_VERSION}"; then
+            echo "Error: Module installation failed"
+            echo "DKMS build succeeded but installation failed"
+            echo "Check dkms status: dkms status"
+            exit 1
+        fi
+        echo "Module installed successfully"
+
+        # Create modules-load.d configuration for autoloading
+        echo "Setting up automatic module loading..."
+        echo "${MODULE_NAME}" > "${MODULES_LOAD_CONFIG}"
+
+        # Trigger depmod to update module dependencies
+        echo "Updating module dependencies..."
+        depmod -a
+
+        echo "Module will be loaded automatically on boot"
+
+        # On upgrade the running kernel may still hold the *previous* build --
+        # for example when prerm's unload failed. A bare modprobe would then
+        # succeed silently and leave the old code active, so drop it first.
+        if module_is_loaded; then
+            echo "Unloading previously running module..."
+            if ! modprobe -r "${MODULE_NAME}"; then
+                echo "Warning: could not unload the running module."
+                echo "The NEW module will only become active after a reboot."
             fi
-            
-            # Setup configuration only if module loads successfully
-            if lsmod | grep -q "${MODULE_NAME}"; then
-                echo "Setting up configuration..."
-                
-                # Create slnat.conf from template if it doesn't exist
-                if [ ! -f "/etc/slnat/slnat.conf" ]; then
-                    echo "Creating default configuration file..."
-                    cp "/etc/slnat/slnat.conf.template" "/etc/slnat/slnat.conf"
-                    echo "Configuration template created at /etc/slnat/slnat.conf"
-                    echo "Please edit this file to configure your NAT mappings"
-                fi
-                
-                # Enable systemd service
-                if command -v systemctl >/dev/null 2>&1; then
-                    echo "Enabling slnat service..."
-                    systemctl daemon-reload
-                    systemctl enable slnat.service || true
-                    echo "Service enabled - routes will be loaded automatically on boot"
-                    echo "To load routes now: systemctl start slnat"
-                fi
-                
-                echo ""
-                echo "Installation completed successfully!"
-                echo ""
-                echo "Usage:"
-                echo "  Configure NAT: slnat <interface> add <internal_prefix> <external_prefix>"
-                echo "  List mappings: slnat <interface> list"
-                echo "  Check status: slnat status"
-                echo "  Load routes: slnat load"
-                echo ""
-                echo "Configuration:"
-                echo "  Edit /etc/slnat/slnat.conf to configure automatic route loading"
-                echo "  Use 'systemctl start slnat' to load routes via systemd"
-            else
-                echo "Module installation completed but module failed to load"
-                echo "Check kernel logs: dmesg | tail -20"
-                echo "Try manual loading: modprobe ${MODULE_NAME}"
-            fi
+        fi
+
+        echo "Loading module..."
+        if modprobe "${MODULE_NAME}"; then
+            echo "Module loaded successfully"
         else
-            echo "Error: Module build completed but DKMS reports it's not installed"
-            echo "Check DKMS status: dkms status"
+            echo "Warning: Module installed but failed to load"
+            echo "This might be due to missing dependencies or kernel incompatibility"
+            echo "Try loading manually: modprobe ${MODULE_NAME}"
+        fi
+
+        if module_is_loaded; then
+            echo "Setting up configuration..."
+
+            # Create slnat.conf from template if it doesn't exist
+            if [ ! -f "/etc/slnat/slnat.conf" ] && [ -f "/etc/slnat/slnat.conf.template" ]; then
+                echo "Creating default configuration file..."
+                cp "/etc/slnat/slnat.conf.template" "/etc/slnat/slnat.conf" || true
+                echo "Configuration template created at /etc/slnat/slnat.conf"
+                echo "Please edit this file to configure your NAT mappings"
+            fi
+
+            if command -v systemctl >/dev/null 2>&1; then
+                echo "Enabling slnat service..."
+                systemctl daemon-reload
+                systemctl enable slnat.service || true
+
+                # Mappings live only in kernel memory, so an upgrade (which
+                # unloads the module) wipes them. Reload them from the config
+                # rather than leaving NAT down until the next reboot.
+                if [ -f "/etc/slnat/slnat.conf" ]; then
+                    echo "Restoring NAT mappings from /etc/slnat/slnat.conf..."
+                    systemctl restart slnat.service || \
+                        echo "Warning: could not load routes; run 'systemctl start slnat' manually"
+                fi
+            fi
+
+            echo ""
+            echo "Installation completed successfully!"
+            echo ""
+            echo "Usage:"
+            echo "  Configure NAT: slnat <interface> add <internal_prefix> <external_prefix>"
+            echo "  List mappings: slnat <interface> list"
+            echo "  Check status: slnat status"
+            echo "  Load routes: slnat load"
+            echo ""
+            echo "Configuration:"
+            echo "  Edit /etc/slnat/slnat.conf to configure automatic route loading"
+            echo "  Use 'systemctl start slnat' to load routes via systemd"
+        else
+            echo "Module installation completed but module failed to load"
+            echo "Check kernel logs: dmesg | tail -20"
+            echo "Try manual loading: modprobe ${MODULE_NAME}"
         fi
         ;;
-        
+
     abort-upgrade|abort-remove|abort-deconfigure)
+        # prerm already unloaded the old module before the upgrade was aborted;
+        # bring it back so the machine does not silently lose NAT.
+        if ! module_is_loaded && dkms_is_installed; then
+            echo "Restoring previously loaded module after aborted upgrade..."
+            modprobe "${MODULE_NAME}" || true
+            if command -v systemctl >/dev/null 2>&1 && [ -f "/etc/slnat/slnat.conf" ]; then
+                systemctl start slnat.service || true
+            fi
+        fi
         ;;
-        
+
     *)
         echo "postinst called with unknown argument \`$1'" >&2
         exit 1

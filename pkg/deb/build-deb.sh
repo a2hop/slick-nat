@@ -35,8 +35,14 @@ mkdir -p "${PACKAGE_DIR}/usr/lib/slnat"
 echo "Copying source files..."
 cp -r "${SOURCE_DIR}/src/"* "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/"
 
-# Copy DKMS configuration
-cp "${SOURCE_DIR}/dkms/dkms.conf" "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/"
+# Copy DKMS configuration.
+# PACKAGE_VERSION is stamped in rather than copied verbatim: dkms.conf must
+# agree with the /usr/src/slick-nat-<version> directory name and with the
+# version the maintainer scripts pass to `dkms add/build/install`. When those
+# drift apart the upgrade fails half-way through, after the old module has
+# already been removed.
+sed "s|^PACKAGE_VERSION=.*|PACKAGE_VERSION=\"${PACKAGE_VERSION}\"|" \
+    "${SOURCE_DIR}/dkms/dkms.conf" > "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/dkms.conf"
 cp "${SOURCE_DIR}/dkms/Makefile" "${PACKAGE_DIR}/usr/src/slick-nat-${PACKAGE_VERSION}/"
 
 # Copy management script
@@ -218,12 +224,20 @@ EOF
 # Copy debian control files
 echo "Creating debian control files..."
 cp control "${PACKAGE_DIR}/DEBIAN/"
-cp postinst "${PACKAGE_DIR}/DEBIAN/"
-cp prerm "${PACKAGE_DIR}/DEBIAN/"
-cp postrm "${PACKAGE_DIR}/DEBIAN/"
 
-# Update control file with architecture
+# Stamp the build's PACKAGE_VERSION into the maintainer scripts instead of
+# copying their hardcoded copy. Otherwise bumping the version here without
+# editing all three scripts produces a package whose postinst runs
+# `dkms add -v <old>` against /usr/src/slick-nat-<new>, which fails only
+# after the previous DKMS entry has been removed.
+for script in postinst prerm postrm; do
+    sed "s|^PACKAGE_VERSION=.*|PACKAGE_VERSION=\"${PACKAGE_VERSION}\"|" \
+        "${script}" > "${PACKAGE_DIR}/DEBIAN/${script}"
+done
+
+# Update control file with architecture and version
 sed -i "s/^Architecture:.*/Architecture: ${ARCHITECTURE}/" "${PACKAGE_DIR}/DEBIAN/control"
+sed -i "s/^Version:.*/Version: ${PACKAGE_VERSION}/" "${PACKAGE_DIR}/DEBIAN/control"
 
 # Make scripts executable
 chmod +x "${PACKAGE_DIR}/DEBIAN/postinst"
